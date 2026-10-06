@@ -7,7 +7,7 @@ target/
 *.dylib
 
 # Go build
-flylab
+/flylab
 
 # Python virtual environments & caches
 __pycache__/
