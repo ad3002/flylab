@@ -1,0 +1,22 @@
+[Unit]
+Description=FlyLab (flylab.aglabx.com)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=flylab
+Group=flylab
+WorkingDirectory=/mnt/beta/flylab/app
+EnvironmentFile=/mnt/beta/flylab/flylab.env
+ExecStart=/mnt/beta/flylab/app/bin/flylab
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/mnt/beta/flylab
+
+[Install]
+WantedBy=multi-user.target
