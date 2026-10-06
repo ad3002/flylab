@@ -37,7 +37,7 @@ fi
 
 "$ROOT_DIR/bin/flysim" prepare \
     --dataset-manifest "$MANIFEST" \
-    --output "$ROOT_DIR/data/cache/flywire_630_csr.bin"
+    --output "$ROOT_DIR/data/cache"
 
 echo "[3/3] Dataset cache verified successfully:"
 ls -lh "$ROOT_DIR/data/cache/flywire_630_csr.bin"
