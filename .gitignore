@@ -1,0 +1,41 @@
+# Binaries and build artifacts
+bin/
+target/
+*.o
+*.a
+*.so
+*.dylib
+
+# Go build
+flylab
+
+# Python virtual environments & caches
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+reference/venv/
+*.egg-info/
+.pytest_cache/
+
+# Node / JS
+node_modules/
+
+# Local databases and runtime data
+*.db
+*.db-wal
+*.db-shm
+data/*.csv
+data/*.parquet
+data/cache/
+artifacts/*
+!artifacts/.gitkeep
+!artifacts/demo_run/
+
+# Environment files with secrets
+.env
+!.env.example
+
+# OS files
+.DS_Store
+Thumbs.db

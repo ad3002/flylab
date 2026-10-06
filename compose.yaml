@@ -1,0 +1,49 @@
+services:
+  flylab:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: flylab:latest
+    container_name: flylab-server
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8080
+      - DOMAIN=flylab.aglabx.com
+      - DB_PATH=/app/data/flylab.db
+      - DATA_DIR=/app/data
+      - ARTIFACTS_DIR=/app/artifacts
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_MODEL=qwen3:8b
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: flylab-ollama
+    restart: unless-stopped
+    profiles:
+      - llm
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+
+  reference:
+    build:
+      context: .
+      dockerfile: Dockerfile.reference
+    image: flylab-reference:latest
+    container_name: flylab-reference-checker
+    profiles:
+      - reference
+    volumes:
+      - ./data:/app/data
+      - ./reference:/app/reference
+      - ./artifacts:/app/artifacts
+
+volumes:
+  ollama_models:

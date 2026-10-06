@@ -1,0 +1,8 @@
+{
+  "duration_ms": 100.0,
+  "engine": "flysim_rust",
+  "repeats": 1,
+  "total_spikes_A": 267,
+  "total_spikes_B": 266,
+  "wall_seconds": 1.902136709
+}

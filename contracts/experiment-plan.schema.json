@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flylab.aglabx.com/schemas/experiment-plan.json",
+  "title": "ExperimentPlan",
+  "description": "Executable specification for a Drosophila brain spiking neural network experiment.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "dataset_id",
+    "experiment_type",
+    "activation",
+    "readout"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["1.0"]
+    },
+    "dataset_id": {
+      "type": "string",
+      "enum": ["flywire_630"]
+    },
+    "model_id": {
+      "type": "string",
+      "enum": ["shiu_lif_rust"]
+    },
+    "experiment_type": {
+      "type": "string",
+      "enum": ["single", "compare_silencing"]
+    },
+    "activation": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["selector", "rate_hz"],
+        "properties": {
+          "selector": {
+            "$ref": "#/$defs/selector"
+          },
+          "rate_hz": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 200.0
+          }
+        }
+      }
+    },
+    "silencing": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["selector"],
+        "properties": {
+          "selector": {
+            "$ref": "#/$defs/selector"
+          }
+        }
+      }
+    },
+    "readout": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["selector"],
+        "properties": {
+          "selector": {
+            "$ref": "#/$defs/selector"
+          }
+        }
+      }
+    },
+    "duration_ms": {
+      "type": "number",
+      "minimum": 10.0,
+      "maximum": 1000.0
+    },
+    "repeats": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3
+    },
+    "base_seed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483645
+    },
+    "report_language": {
+      "type": "string",
+      "enum": ["en", "ru"]
+    }
+  },
+  "$defs": {
+    "selector": {
+      "type": "object",
+      "properties": {
+        "group_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "neuron_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 500,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]{15,20}$"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": ["group_id"]
+        },
+        {
+          "required": ["neuron_ids"]
+        }
+      ]
+    }
+  }
+}

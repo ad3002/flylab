@@ -1,0 +1,25 @@
+{
+  "dataset_id": "flywire_630",
+  "experiment_type": "compare_silencing",
+  "duration_ms": 100.0,
+  "readout_neurons": [
+    "720575940645521262",
+    "720575940660219265"
+  ],
+  "readout_summary": [
+    {
+      "root_id": "720575940645521262",
+      "rate_A_hz": 0.0,
+      "rate_B_hz": 0.0,
+      "delta_hz": 0.0
+    },
+    {
+      "root_id": "720575940660219265",
+      "rate_A_hz": 0.0,
+      "rate_B_hz": 0.0,
+      "delta_hz": 0.0
+    }
+  ],
+  "active_neurons_count_A": 82,
+  "active_neurons_count_B": 80
+}

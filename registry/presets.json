@@ -1,0 +1,73 @@
+{
+  "schema_version": "1.0",
+  "presets": [
+    {
+      "preset_id": "sugar_stimulation",
+      "name": "Sugar GRN Stimulation (Single Condition)",
+      "description": "Stimulate sugar-sensing gustatory receptor neurons at 50 Hz for 100 ms and measure readout activity in MN9 feeding motor neurons.",
+      "plan": {
+        "schema_version": "1.0",
+        "dataset_id": "flywire_630",
+        "model_id": "shiu_lif_rust",
+        "experiment_type": "single",
+        "activation": [
+          {
+            "selector": {
+              "group_id": "sugar_grn"
+            },
+            "rate_hz": 50.0
+          }
+        ],
+        "silencing": [],
+        "readout": [
+          {
+            "selector": {
+              "group_id": "mn9"
+            }
+          }
+        ],
+        "duration_ms": 100.0,
+        "repeats": 1,
+        "base_seed": 42,
+        "report_language": "en"
+      }
+    },
+    {
+      "preset_id": "sugar_silencing_compare",
+      "name": "Sugar Stimulation vs Silencing Comparison (Conditions A & B)",
+      "description": "Condition A stimulates sugar_grn at 50 Hz. Condition B adds silencing of demo_silencing (sugar GRN #12). Compares activity and calculates delta Hz.",
+      "plan": {
+        "schema_version": "1.0",
+        "dataset_id": "flywire_630",
+        "model_id": "shiu_lif_rust",
+        "experiment_type": "compare_silencing",
+        "activation": [
+          {
+            "selector": {
+              "group_id": "sugar_grn"
+            },
+            "rate_hz": 50.0
+          }
+        ],
+        "silencing": [
+          {
+            "selector": {
+              "group_id": "demo_silencing"
+            }
+          }
+        ],
+        "readout": [
+          {
+            "selector": {
+              "group_id": "mn9"
+            }
+          }
+        ],
+        "duration_ms": 100.0,
+        "repeats": 1,
+        "base_seed": 42,
+        "report_language": "en"
+      }
+    }
+  ]
+}

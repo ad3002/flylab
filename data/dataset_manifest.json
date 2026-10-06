@@ -1,0 +1,54 @@
+{
+  "schema_version": "1.0",
+  "dataset_id": "flywire_630",
+  "name": "FlyWire Materialization 630 Connectome",
+  "upstream_repository": "https://github.com/philshiu/Drosophila_brain_model",
+  "upstream_commit": "91bdd1e7dcf193f3e7ca5a8933497fcef63b7960",
+  "citation": "Shiu et al., Nature 2024. doi:10.1038/s41586-024-07763-9",
+  "license": {
+    "code": "MIT",
+    "data": "FlyWire Data Use Agreement / CC-BY 4.0 Open Scientific Data"
+  },
+  "neuron_count": 127400,
+  "connection_count": 14687178,
+  "connection_representation": "aggregated_neuron_pair",
+  "files": {
+    "completeness": {
+      "path": "data/2023_03_23_completeness_630_final.csv",
+      "filename": "2023_03_23_completeness_630_final.csv",
+      "size_bytes": 3057611,
+      "sha256": "e6b71e17671a9bdb05f55e4bc6774640a1418cb7a05125e0fc994ad40f9bfdfb",
+      "rows": 127400,
+      "id_type": "int64_string",
+      "columns": ["FlyWire_ID", "Completed"]
+    },
+    "connectivity": {
+      "path": "data/2023_03_23_connectivity_630_final.parquet",
+      "filename": "2023_03_23_connectivity_630_final.parquet",
+      "size_bytes": 86630944,
+      "sha256": "94db8c650533bc36ffa3223f2e62325d5648b8d6bd31c3a4e1c804628c7557b3",
+      "rows": 14687178,
+      "columns": [
+        "Presynaptic_ID",
+        "Postsynaptic_ID",
+        "Presynaptic_Index",
+        "Postsynaptic_Index",
+        "Connectivity",
+        "Excitatory",
+        "Excitatory x Connectivity"
+      ]
+    }
+  },
+  "default_model_parameters": {
+    "v_0_mv": -52.0,
+    "v_rst_mv": -52.0,
+    "v_th_mv": -45.0,
+    "t_mbr_ms": 20.0,
+    "tau_ms": 5.0,
+    "t_rfc_ms": 2.2,
+    "t_dly_ms": 1.8,
+    "w_syn_mv": 0.275,
+    "f_poi": 250.0,
+    "dt_ms": 0.1
+  }
+}

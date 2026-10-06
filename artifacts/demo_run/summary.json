@@ -1,0 +1,29 @@
+{
+  "active_neurons_count_A": 86,
+  "active_neurons_count_B": 86,
+  "dataset_id": "flywire_630",
+  "duration_ms": 100.0,
+  "experiment_type": "compare_silencing",
+  "model_id": "shiu_lif_rust",
+  "readout_neurons": [
+    "720575940645521262",
+    "720575940660219265"
+  ],
+  "readout_summary": [
+    {
+      "delta_hz": 0.0,
+      "rate_A_hz": 0.0,
+      "rate_B_hz": 0.0,
+      "root_id": "720575940645521262"
+    },
+    {
+      "delta_hz": 0.0,
+      "rate_A_hz": 0.0,
+      "rate_B_hz": 0.0,
+      "root_id": "720575940660219265"
+    }
+  ],
+  "repeats": 1,
+  "total_spikes_A": 267,
+  "total_spikes_B": 266
+}

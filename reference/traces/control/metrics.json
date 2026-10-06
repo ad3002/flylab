@@ -1,0 +1,16 @@
+{
+  "engine": "brian2",
+  "python_version": "3.10.13 | packaged by conda-forge | (main, Oct 26 2023, 18:09:17) [Clang 16.0.6 ]",
+  "brian2_version": "2.5.1",
+  "codegen_target": "numpy",
+  "duration_ms": 100.0,
+  "rate_hz": 50.0,
+  "base_seed": 42,
+  "build_time_A_s": 0.6462609767913818,
+  "sim_time_A_s": 1.9912519454956055,
+  "build_time_B_s": 0.8684637546539307,
+  "sim_time_B_s": 2.5645718574523926,
+  "total_wall_s": 7.824916839599609,
+  "total_spikes_A": 267,
+  "total_spikes_B": 260
+}
