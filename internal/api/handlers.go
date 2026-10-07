@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/ad3002/flylab/internal/domain"
 	"github.com/ad3002/flylab/internal/export"
 	"github.com/ad3002/flylab/internal/llm"
+	"github.com/ad3002/flylab/internal/ratelimit"
 	"github.com/ad3002/flylab/internal/storage"
 )
 
@@ -29,6 +32,29 @@ type Server struct {
 	registry  *contracts.Registry
 	llmClient *llm.Client
 	router    *http.ServeMux
+	auth      *authGuard
+	worker    WorkerStatus
+}
+
+// WorkerStatus is the background worker's health as the API reports it. LastError is nil
+// while the worker is healthy; otherwise it describes a failure the user must see (e.g. a
+// job's final status could not be saved), surfaced as /health 503 and capabilities.worker_error.
+type WorkerStatus interface {
+	LastError() error
+}
+
+// SetWorker connects the background worker's health to /health and /capabilities.
+func (s *Server) SetWorker(w WorkerStatus) { s.worker = w }
+
+func (s *Server) workerError() *string {
+	if s.worker == nil {
+		return nil
+	}
+	if err := s.worker.LastError(); err != nil {
+		msg := err.Error()
+		return &msg
+	}
+	return nil
 }
 
 func NewServer(
@@ -45,6 +71,7 @@ func NewServer(
 		registry:  registry,
 		llmClient: llmClient,
 		router:    http.NewServeMux(),
+		auth:      newAuthGuard(cfg),
 	}
 	s.registerRoutes()
 	return s
@@ -63,10 +90,13 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Request-ID", reqID)
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Idempotency-Key, X-Request-ID")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key, X-Request-ID")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if !s.csrfCheck(w, r) {
 			return
 		}
 
@@ -75,46 +105,53 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 }
 
 func (s *Server) registerRoutes() {
-	// Web UI
+	// Pages (contract section 1)
 	s.router.HandleFunc("GET /{$}", s.handleIndex)
+	s.router.HandleFunc("GET /app", s.handleApp)
+	s.router.HandleFunc("GET /app/{path...}", s.handleApp)
+	s.router.HandleFunc("GET /favicon.ico", s.handleFavicon)
 	staticDir := filepath.Join(s.cfg.WebDir, "static")
 	s.router.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
 
-	// Base endpoints
+	// Public base endpoints
 	s.router.HandleFunc("GET /health", s.handleHealth)
 	s.router.HandleFunc("GET /capabilities", s.handleCapabilities)
 	s.router.HandleFunc("GET /datasets", s.handleDatasets)
 	s.router.HandleFunc("GET /groups", s.handleGroups)
 	s.router.HandleFunc("GET /neurons", s.handleNeurons)
 
-	// API v1 endpoints
-	s.router.HandleFunc("POST /api/v1/plans/parse", s.handlePlanParse)
-	s.router.HandleFunc("POST /api/v1/plans/validate", s.handlePlanValidate)
-	s.router.HandleFunc("POST /api/v1/jobs", s.handleCreateJob)
-	s.router.HandleFunc("GET /api/v1/jobs", s.handleListJobs)
-	s.router.HandleFunc("GET /api/v1/jobs/{job_id}", s.handleGetJob)
-	s.router.HandleFunc("POST /api/v1/jobs/{job_id}/cancel", s.handleCancelJob)
-	s.router.HandleFunc("GET /api/v1/jobs/{job_id}/results", s.handleJobResults)
-	s.router.HandleFunc("GET /api/v1/jobs/{job_id}/spikes", s.handleJobSpikes)
-	s.router.HandleFunc("GET /api/v1/jobs/{job_id}/export", s.handleJobExport)
-	s.router.HandleFunc("GET /api/v1/jobs/{job_id}/artifacts/{artifact_id}", s.handleJobArtifact)
+	// Accounts (contract section 2)
+	s.router.HandleFunc("POST /api/v1/auth/register", s.handleRegister)
+	s.router.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
+	s.router.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
+	s.router.HandleFunc("GET /api/v1/me", s.requireAuth(s.handleMe))
 
-	// Direct routes without /api/v1 prefix
-	s.router.HandleFunc("POST /plans/parse", s.handlePlanParse)
-	s.router.HandleFunc("POST /plans/validate", s.handlePlanValidate)
-	s.router.HandleFunc("POST /jobs", s.handleCreateJob)
-	s.router.HandleFunc("GET /jobs", s.handleListJobs)
-	s.router.HandleFunc("GET /jobs/{job_id}", s.handleGetJob)
-	s.router.HandleFunc("POST /jobs/{job_id}/cancel", s.handleCancelJob)
-	s.router.HandleFunc("GET /jobs/{job_id}/results", s.handleJobResults)
-	s.router.HandleFunc("GET /jobs/{job_id}/spikes", s.handleJobSpikes)
-	s.router.HandleFunc("GET /jobs/{job_id}/export", s.handleJobExport)
-	s.router.HandleFunc("GET /jobs/{job_id}/artifacts/{artifact_id}", s.handleJobArtifact)
+	// API v1 and the legacy un-prefixed routes share handlers and auth rules (section 3).
+	for _, prefix := range []string{"/api/v1", ""} {
+		s.router.HandleFunc("POST "+prefix+"/plans/validate", s.handlePlanValidate)
+		s.router.HandleFunc("POST "+prefix+"/plans/parse", s.requireAuth(s.handlePlanParse))
+		s.router.HandleFunc("POST "+prefix+"/jobs", s.requireAuth(s.handleCreateJob))
+		s.router.HandleFunc("GET "+prefix+"/jobs", s.requireAuth(s.handleListJobs))
+		s.router.HandleFunc("GET "+prefix+"/jobs/{job_id}", s.requireAuth(s.handleGetJob))
+		s.router.HandleFunc("POST "+prefix+"/jobs/{job_id}/cancel", s.requireAuth(s.handleCancelJob))
+		s.router.HandleFunc("GET "+prefix+"/jobs/{job_id}/results", s.requireAuth(s.handleJobResults))
+		s.router.HandleFunc("GET "+prefix+"/jobs/{job_id}/spikes", s.requireAuth(s.handleJobSpikes))
+		s.router.HandleFunc("GET "+prefix+"/jobs/{job_id}/export", s.requireAuth(s.handleJobExport))
+		s.router.HandleFunc("GET "+prefix+"/jobs/{job_id}/artifacts/{artifact_id}", s.requireAuth(s.handleJobArtifact))
+	}
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	indexPath := filepath.Join(s.cfg.WebDir, "templates", "index.html")
-	http.ServeFile(w, r, indexPath)
+	http.ServeFile(w, r, filepath.Join(s.cfg.WebDir, "templates", "index.html"))
+}
+
+func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, filepath.Join(s.cfg.WebDir, "templates", "app.html"))
+}
+
+func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/svg+xml")
+	http.ServeFile(w, r, filepath.Join(s.cfg.WebDir, "static", "img", "favicon.svg"))
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, status int, data interface{}) {
@@ -137,37 +174,39 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, status int, 
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":  "ok",
-		"service": "flylab",
-		"domain":  s.cfg.Domain,
-		"version": "1.0.0",
-		"time":    time.Now().UTC().Format(time.RFC3339),
+	status, code := "ok", http.StatusOK
+	werr := s.workerError()
+	if werr != nil {
+		status, code = "degraded", http.StatusServiceUnavailable
+	}
+	s.writeJSON(w, code, map[string]interface{}{
+		"status":       status,
+		"service":      "flylab",
+		"domain":       s.cfg.Domain,
+		"version":      "1.0.0",
+		"time":         time.Now().UTC().Format(time.RFC3339),
+		"worker_error": werr,
 	})
 }
 
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
-	// Check data presence
-	dataReady := true
-	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "dataset_manifest.json")); os.IsNotExist(err) {
-		dataReady = false
-	}
-
-	// Check flysim binary
-	workerReady := true
-	if _, err := os.Stat(s.cfg.FlysimBin); os.IsNotExist(err) {
-		workerReady = false
-	}
+	_, dataErr := os.Stat(filepath.Join(s.cfg.DataDir, "dataset_manifest.json"))
+	_, flysimErr := os.Stat(s.cfg.FlysimBin)
 
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"datasets_ready": dataReady,
-		"worker_ready":   workerReady,
-		"llm_model":      s.cfg.OllamaModel,
-		"llm_ready":      true,
+		"datasets_ready":    dataErr == nil,
+		"worker_ready":      flysimErr == nil && s.workerError() == nil,
+		"worker_error":      s.workerError(),
+		"llm_provider":      "claude-cli",
+		"llm_model":         s.cfg.ClaudeModel,
+		"llm_ready":         s.llmClient.Ready(),
+		"registration_open": s.cfg.RegistrationOpen,
 		"limits": map[string]interface{}{
 			"max_wall_seconds":   s.cfg.MaxWallSeconds,
 			"max_rss_bytes":      s.cfg.MaxRSSBytes,
 			"max_artifact_bytes": s.cfg.MaxArtifactBytes,
+			"max_prompt_chars":   llm.MaxPromptChars,
+			"max_title_chars":    maxTitleChars,
 		},
 	})
 }
@@ -176,11 +215,16 @@ func (s *Server) handleDatasets(w http.ResponseWriter, r *http.Request) {
 	manifestPath := filepath.Join(s.cfg.DataDir, "dataset_manifest.json")
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
-		s.writeError(w, r, http.StatusInternalServerError, "DATASET_MANIFEST_ERROR", "Failed to load dataset manifest", nil)
+		s.writeError(w, r, http.StatusInternalServerError, "DATASET_MANIFEST_ERROR",
+			fmt.Sprintf("Failed to load dataset manifest: %v", err), nil)
 		return
 	}
 	var manifest interface{}
-	_ = json.Unmarshal(data, &manifest)
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "DATASET_MANIFEST_CORRUPT",
+			fmt.Sprintf("dataset_manifest.json cannot be parsed: %v", err), nil)
+		return
+	}
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"datasets": []interface{}{manifest},
 	})
@@ -220,7 +264,7 @@ func (s *Server) handleNeurons(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handlePlanParse(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handlePlanParse(w http.ResponseWriter, r *http.Request, user *domain.User) {
 	var body struct {
 		Prompt         string `json:"prompt"`
 		DatasetID      string `json:"dataset_id"`
@@ -230,28 +274,55 @@ func (s *Server) handlePlanParse(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusUnprocessableEntity, "INVALID_REQUEST_BODY", err.Error(), nil)
 		return
 	}
-
-	if body.Prompt == "" {
+	if strings.TrimSpace(body.Prompt) == "" {
 		s.writeError(w, r, http.StatusUnprocessableEntity, "EMPTY_PROMPT", "Prompt cannot be empty", nil)
 		return
 	}
-
 	if body.ReportLanguage == "" {
 		body.ReportLanguage = "en"
 	}
+	if body.ReportLanguage != "en" && body.ReportLanguage != "ru" {
+		s.writeError(w, r, http.StatusUnprocessableEntity, "INVALID_REPORT_LANGUAGE",
+			fmt.Sprintf("report_language must be \"en\" or \"ru\" (got %q)", body.ReportLanguage), nil)
+		return
+	}
+	if body.DatasetID != "" && body.DatasetID != "flywire_630" {
+		s.writeError(w, r, http.StatusUnprocessableEntity, "UNKNOWN_DATASET",
+			fmt.Sprintf("dataset_id %q is not available (only flywire_630)", body.DatasetID), nil)
+		return
+	}
 
-	res, err := s.llmClient.ParsePrompt(r.Context(), body.Prompt, body.DatasetID, body.ReportLanguage)
+	res, err := s.llmClient.ParsePromptFrom(r.Context(), user.ID, clientIP(r), body.Prompt, body.DatasetID, body.ReportLanguage)
 	if err != nil {
-		if errors.Is(err, llm.ErrLLMUnavailable) {
-			s.writeError(w, r, http.StatusServiceUnavailable, "LLM_UNAVAILABLE", "Local LLM service is currently unavailable", nil)
-			return
+		var rl *llm.RateLimitError
+		var le *llm.Error
+		switch {
+		case errors.As(err, &rl):
+			retry := ratelimit.RetrySeconds(rl.RetryAfter)
+			w.Header().Set("Retry-After", strconv.Itoa(retry))
+			details := map[string]interface{}{"scope": rl.Scope, "retry_after_seconds": retry}
+			if rl.Scope == llm.ScopeUserInFlight {
+				details["limit"] = rl.Limit
+			} else {
+				details["limit_per_hour"] = rl.Limit
+			}
+			s.writeError(w, r, http.StatusTooManyRequests, "RATE_LIMITED", rl.Error(), details)
+		case errors.Is(err, llm.ErrBusy):
+			s.writeError(w, r, http.StatusServiceUnavailable, "LLM_BUSY", err.Error(), nil)
+		case errors.As(err, &le):
+			s.writeError(w, r, http.StatusBadGateway, "LLM_ERROR", le.Error(), nil)
+		default:
+			s.writeError(w, r, http.StatusInternalServerError, "PARSE_FAILED", err.Error(), nil)
 		}
-		s.writeError(w, r, http.StatusInternalServerError, "LLM_ERROR", err.Error(), nil)
 		return
 	}
 
 	if res.ResolvedPlan != nil && res.Plan != nil {
-		_ = s.store.SavePlan(res.Plan, res.ResolvedPlan)
+		if err := s.store.SavePlan(res.Plan, res.ResolvedPlan); err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, "STORE_ERROR",
+				fmt.Sprintf("plan was parsed but could not be saved: %v", err), nil)
+			return
+		}
 	}
 
 	s.writeJSON(w, http.StatusOK, res)
@@ -289,23 +360,52 @@ func (s *Server) handlePlanValidate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
+const maxTitleChars = 120
+
+func optionalText(raw string, max int, field string) (*string, error) {
+	t := strings.TrimSpace(raw)
+	if t == "" {
+		return nil, nil
+	}
+	if n := utf8.RuneCountInString(t); n > max {
+		return nil, fmt.Errorf("%s must be at most %d characters (got %d)", field, max, n)
+	}
+	return &t, nil
+}
+
+func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request, user *domain.User) {
 	var body struct {
 		PlanID string `json:"plan_id"`
+		Prompt string `json:"prompt"`
+		Title  string `json:"title"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		s.writeError(w, r, http.StatusUnprocessableEntity, "INVALID_REQUEST", err.Error(), nil)
 		return
 	}
-
 	if body.PlanID == "" {
 		s.writeError(w, r, http.StatusUnprocessableEntity, "MISSING_PLAN_ID", "plan_id is required", nil)
+		return
+	}
+	prompt, err := optionalText(body.Prompt, llm.MaxPromptChars, "prompt")
+	if err != nil {
+		s.writeError(w, r, http.StatusUnprocessableEntity, "PROMPT_TOO_LONG", err.Error(), nil)
+		return
+	}
+	title, err := optionalText(body.Title, maxTitleChars, "title")
+	if err != nil {
+		s.writeError(w, r, http.StatusUnprocessableEntity, "TITLE_TOO_LONG", err.Error(), nil)
 		return
 	}
 
 	resolved, err := s.store.GetResolvedPlan(body.PlanID)
 	if err != nil {
-		s.writeError(w, r, http.StatusNotFound, "PLAN_NOT_FOUND", fmt.Sprintf("Plan %s not found", body.PlanID), nil)
+		if errors.Is(err, storage.ErrNotFound) {
+			s.writeError(w, r, http.StatusNotFound, "PLAN_NOT_FOUND", fmt.Sprintf("Plan %s not found", body.PlanID), nil)
+			return
+		}
+		s.writeError(w, r, http.StatusInternalServerError, "PLAN_LOAD_ERROR",
+			fmt.Sprintf("Plan %s cannot be loaded: %v", body.PlanID, err), nil)
 		return
 	}
 
@@ -315,8 +415,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jobID := fmt.Sprintf("job_%s", uuid.New().String()[:8])
-	artifactsDir := filepath.Join(s.cfg.ArtifactsDir, jobID)
-
+	uid := user.ID
 	job := &domain.Job{
 		JobID:          jobID,
 		PlanID:         resolved.PlanID,
@@ -325,8 +424,11 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		Stage:          "queued",
 		ProgressPct:    0.0,
 		IdempotencyKey: idempKey,
-		ArtifactsDir:   artifactsDir,
+		ArtifactsDir:   filepath.Join(s.cfg.ArtifactsDir, jobID),
 		CreatedAt:      time.Now().UTC(),
+		Prompt:         prompt,
+		Title:          title,
+		UserID:         &uid,
 	}
 
 	createdJob, isNew, err := s.store.CreateJob(job, idempKey)
@@ -345,7 +447,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, status, map[string]interface{}{
-		"job":   createdJob,
+		"job": createdJob,
 		"links": map[string]string{
 			"status":  fmt.Sprintf("/api/v1/jobs/%s", createdJob.JobID),
 			"results": fmt.Sprintf("/api/v1/jobs/%s/results", createdJob.JobID),
@@ -354,51 +456,92 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
-	limit := 50
-	if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 && l <= 100 {
+var validJobStatuses = map[string]bool{
+	string(domain.StatusQueued): true, string(domain.StatusRunning): true,
+	string(domain.StatusCancelling): true, string(domain.StatusSucceeded): true,
+	string(domain.StatusFailed): true, string(domain.StatusCancelled): true,
+}
+
+func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request, user *domain.User) {
+	q := r.URL.Query()
+	limit := 24
+	if raw := q.Get("limit"); raw != "" {
+		l, err := strconv.Atoi(raw)
+		if err != nil || l < 1 || l > 100 {
+			s.writeError(w, r, http.StatusUnprocessableEntity, "INVALID_LIMIT",
+				fmt.Sprintf("limit must be an integer from 1 to 100 (got %q)", raw), nil)
+			return
+		}
 		limit = l
 	}
 	offset := 0
-	if o, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && o >= 0 {
+	if raw := q.Get("offset"); raw != "" {
+		o, err := strconv.Atoi(raw)
+		if err != nil || o < 0 {
+			s.writeError(w, r, http.StatusUnprocessableEntity, "INVALID_OFFSET",
+				fmt.Sprintf("offset must be a non-negative integer (got %q)", raw), nil)
+			return
+		}
 		offset = o
 	}
+	status := q.Get("status")
+	if status != "" && !validJobStatuses[status] {
+		s.writeError(w, r, http.StatusUnprocessableEntity, "INVALID_STATUS",
+			fmt.Sprintf("status %q is not a job status", status), nil)
+		return
+	}
 
-	jobs, err := s.store.ListJobs(limit, offset)
+	jobs, total, err := s.store.ListJobsForUser(user.ID, status, limit, offset)
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "LIST_JOBS_ERROR", err.Error(), nil)
 		return
 	}
+	out := make([]*domain.HistoryJob, 0, len(jobs))
+	for _, j := range jobs {
+		out = append(out, s.buildHistoryJob(j))
+	}
 
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"jobs":   jobs,
-		"count":  len(jobs),
+		"jobs":   out,
+		"total":  total,
 		"limit":  limit,
 		"offset": offset,
 	})
 }
 
-func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
+// loadOwnedJob writes 404 JOB_NOT_FOUND for missing jobs and for jobs of other users (or
+// ownerless jobs), so existence is never leaked. ok=false means a response was written.
+func (s *Server) loadOwnedJob(w http.ResponseWriter, r *http.Request, user *domain.User) (*domain.Job, bool) {
 	jobID := r.PathValue("job_id")
-	job, err := s.store.GetJob(jobID)
+	job, err := s.store.GetJobForUser(jobID, user.ID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			s.writeError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", fmt.Sprintf("Job %s not found", jobID), nil)
-			return
+			return nil, false
 		}
 		s.writeError(w, r, http.StatusInternalServerError, "GET_JOB_ERROR", err.Error(), nil)
-		return
+		return nil, false
 	}
-
-	s.writeJSON(w, http.StatusOK, job)
+	return job, true
 }
 
-func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
-	jobID := r.PathValue("job_id")
-	job, err := s.store.CancelJob(jobID)
+func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request, user *domain.User) {
+	job, ok := s.loadOwnedJob(w, r, user)
+	if !ok {
+		return
+	}
+	s.writeJSON(w, http.StatusOK, s.buildHistoryJob(job))
+}
+
+func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request, user *domain.User) {
+	owned, ok := s.loadOwnedJob(w, r, user)
+	if !ok {
+		return
+	}
+	job, err := s.store.CancelJob(owned.JobID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			s.writeError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", fmt.Sprintf("Job %s not found", jobID), nil)
+			s.writeError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", fmt.Sprintf("Job %s not found", owned.JobID), nil)
 			return
 		}
 		if errors.Is(err, storage.ErrInvalidState) {
@@ -412,11 +555,9 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, job)
 }
 
-func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
-	jobID := r.PathValue("job_id")
-	job, err := s.store.GetJob(jobID)
-	if err != nil {
-		s.writeError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", fmt.Sprintf("Job %s not found", jobID), nil)
+func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request, user *domain.User) {
+	job, ok := s.loadOwnedJob(w, r, user)
+	if !ok {
 		return
 	}
 
@@ -425,15 +566,19 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	summaryPath := filepath.Join(job.ArtifactsDir, "summary.json")
-	summaryData, err := os.ReadFile(summaryPath)
+	summaryData, err := os.ReadFile(filepath.Join(job.ArtifactsDir, "summary.json"))
 	if err != nil {
-		s.writeError(w, r, http.StatusInternalServerError, "RESULTS_NOT_FOUND", "Summary results missing", nil)
+		s.writeError(w, r, http.StatusInternalServerError, "RESULTS_NOT_FOUND",
+			fmt.Sprintf("Summary results cannot be read: %v", err), nil)
 		return
 	}
 
 	var summaryObj interface{}
-	_ = json.Unmarshal(summaryData, &summaryObj)
+	if err := json.Unmarshal(summaryData, &summaryObj); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "RESULTS_CORRUPT",
+			fmt.Sprintf("summary.json cannot be parsed: %v", err), nil)
+		return
+	}
 
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"job_id":  job.JobID,
@@ -441,101 +586,141 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleJobSpikes(w http.ResponseWriter, r *http.Request) {
-	jobID := r.PathValue("job_id")
-	job, err := s.store.GetJob(jobID)
-	if err != nil {
-		s.writeError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", fmt.Sprintf("Job %s not found", jobID), nil)
-		return
-	}
+// ratesHeader is the exact header flysim writes to rates.csv.
+const ratesHeader = "condition,trial,root_id,spike_count,rate_hz,is_readout"
 
-	ratesPath := filepath.Join(job.ArtifactsDir, "rates.csv")
-	ratesData, err := os.ReadFile(ratesPath)
-	if err != nil {
-		s.writeError(w, r, http.StatusNotFound, "RATES_NOT_FOUND", "Rates data not found", nil)
+type spikeRateRow struct {
+	Condition  string  `json:"condition"`
+	Trial      int     `json:"trial"`
+	RootID     string  `json:"root_id"`
+	SpikeCount int     `json:"spike_count"`
+	RateHz     float64 `json:"rate_hz"`
+	IsReadout  bool    `json:"is_readout"`
+	raw        string
+}
+
+// parseRatesRow validates one rates.csv data line (exactly 6 columns, typed values).
+func parseRatesRow(line string) (spikeRateRow, error) {
+	parts := strings.Split(line, ",")
+	if len(parts) != 6 {
+		return spikeRateRow{}, fmt.Errorf("has %d columns, expected 6", len(parts))
+	}
+	row := spikeRateRow{Condition: parts[0], RootID: parts[2], raw: line}
+	if row.Condition == "" || row.RootID == "" {
+		return row, errors.New("condition and root_id must not be empty")
+	}
+	var err error
+	if row.Trial, err = strconv.Atoi(parts[1]); err != nil || row.Trial < 0 {
+		return row, fmt.Errorf("trial %q is not a non-negative integer", parts[1])
+	}
+	if row.SpikeCount, err = strconv.Atoi(parts[3]); err != nil || row.SpikeCount < 0 {
+		return row, fmt.Errorf("spike_count %q is not a non-negative integer", parts[3])
+	}
+	row.RateHz, err = strconv.ParseFloat(parts[4], 64)
+	if err != nil || math.IsNaN(row.RateHz) || math.IsInf(row.RateHz, 0) || row.RateHz < 0 {
+		return row, fmt.Errorf("rate_hz %q is not a finite non-negative number", parts[4])
+	}
+	switch parts[5] {
+	case "true":
+		row.IsReadout = true
+	case "false":
+	default:
+		return row, fmt.Errorf("is_readout %q is not true/false", parts[5])
+	}
+	return row, nil
+}
+
+func (s *Server) handleJobSpikes(w http.ResponseWriter, r *http.Request, user *domain.User) {
+	job, ok := s.loadOwnedJob(w, r, user)
+	if !ok {
 		return
 	}
 
 	condFilter := strings.TrimSpace(r.URL.Query().Get("condition"))
 	rootFilter := strings.TrimSpace(r.URL.Query().Get("root_id"))
 	limit := 10000
-	if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 && l <= 10000 {
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		l, err := strconv.Atoi(raw)
+		if err != nil || l < 1 || l > 10000 {
+			s.writeError(w, r, http.StatusUnprocessableEntity, "INVALID_LIMIT",
+				fmt.Sprintf("limit must be an integer from 1 to 10000 (got %q)", raw), nil)
+			return
+		}
 		limit = l
 	}
 	offset := 0
-	if o, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && o >= 0 {
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		o, err := strconv.Atoi(raw)
+		if err != nil || o < 0 {
+			s.writeError(w, r, http.StatusUnprocessableEntity, "INVALID_OFFSET",
+				fmt.Sprintf("offset must be a non-negative integer (got %q)", raw), nil)
+			return
+		}
 		offset = o
 	}
 
+	ratesPath := filepath.Join(job.ArtifactsDir, "rates.csv")
+	ratesData, err := os.ReadFile(ratesPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.writeError(w, r, http.StatusNotFound, "RATES_NOT_FOUND", fmt.Sprintf("Job %s has no rates.csv", job.JobID), nil)
+			return
+		}
+		// Exists but unreadable (permissions, I/O error): a server-side fault, not "not found".
+		s.writeError(w, r, http.StatusInternalServerError, "RATES_UNREADABLE",
+			fmt.Sprintf("rates.csv of job %s cannot be read: %v", job.JobID, err), nil)
+		return
+	}
+
+	// Every row is validated before filtering and paging, in both output formats: a corrupt
+	// row on another page or in CSV mode must not pass as data.
 	lines := strings.Split(string(ratesData), "\n")
-	var matchedRows [][]string
-	header := ""
-	for i, line := range lines {
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != ratesHeader {
+		s.writeError(w, r, http.StatusInternalServerError, "RATES_CORRUPT",
+			fmt.Sprintf("rates.csv line 1 is %q, expected the header %q", strings.TrimSpace(lines[0]), ratesHeader), nil)
+		return
+	}
+	var matched []spikeRateRow
+	for i, line := range lines[1:] {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue
 		}
-		if i == 0 {
-			header = trimmed
+		row, err := parseRatesRow(trimmed)
+		if err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, "RATES_CORRUPT",
+				fmt.Sprintf("rates.csv line %d %v", i+2, err), map[string]interface{}{"line": i + 2})
+			return
+		}
+		if condFilter != "" && !strings.EqualFold(row.Condition, condFilter) {
 			continue
 		}
-		parts := strings.Split(trimmed, ",")
-		if len(parts) < 6 {
+		if rootFilter != "" && row.RootID != rootFilter {
 			continue
 		}
-		// condition,trial,root_id,spike_count,rate_hz,is_readout
-		if condFilter != "" && !strings.EqualFold(parts[0], condFilter) {
-			continue
-		}
-		if rootFilter != "" && parts[2] != rootFilter {
-			continue
-		}
-		matchedRows = append(matchedRows, parts)
+		matched = append(matched, row)
 	}
 
-	total := len(matchedRows)
-	var paginatedRows [][]string
+	total := len(matched)
+	page := []spikeRateRow{}
 	if offset < total {
 		end := offset + limit
 		if end > total {
 			end = total
 		}
-		paginatedRows = matchedRows[offset:end]
+		page = matched[offset:end]
 	}
 
 	format := r.URL.Query().Get("format")
 	acceptJSON := strings.Contains(r.Header.Get("Accept"), "application/json")
 
 	if format == "json" || (format == "" && acceptJSON) {
-		type SpikeRateRow struct {
-			Condition  string  `json:"condition"`
-			Trial      int     `json:"trial"`
-			RootID     string  `json:"root_id"`
-			SpikeCount int     `json:"spike_count"`
-			RateHz     float64 `json:"rate_hz"`
-			IsReadout  bool    `json:"is_readout"`
-		}
-		var rows []SpikeRateRow
-		for _, parts := range paginatedRows {
-			trial, _ := strconv.Atoi(parts[1])
-			spikes, _ := strconv.Atoi(parts[3])
-			rate, _ := strconv.ParseFloat(parts[4], 64)
-			isRo := parts[5] == "true"
-			rows = append(rows, SpikeRateRow{
-				Condition:  parts[0],
-				Trial:      trial,
-				RootID:     parts[2],
-				SpikeCount: spikes,
-				RateHz:     rate,
-				IsReadout:  isRo,
-			})
-		}
 		s.writeJSON(w, http.StatusOK, map[string]interface{}{
 			"job_id": job.JobID,
 			"total":  total,
 			"limit":  limit,
 			"offset": offset,
-			"spikes": rows,
+			"spikes": page,
 		})
 		return
 	}
@@ -543,18 +728,26 @@ func (s *Server) handleJobSpikes(w http.ResponseWriter, r *http.Request) {
 	// Default CSV response
 	w.Header().Set("Content-Type", "text/csv")
 	var sb strings.Builder
-	sb.WriteString(header + "\n")
-	for _, row := range paginatedRows {
-		sb.WriteString(strings.Join(row, ",") + "\n")
+	sb.WriteString(ratesHeader + "\n")
+	for _, row := range page {
+		sb.WriteString(row.raw + "\n")
 	}
 	_, _ = w.Write([]byte(sb.String()))
 }
 
-func (s *Server) handleJobExport(w http.ResponseWriter, r *http.Request) {
-	jobID := r.PathValue("job_id")
-	job, err := s.store.GetJob(jobID)
-	if err != nil {
-		s.writeError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", fmt.Sprintf("Job %s not found", jobID), nil)
+func (s *Server) handleJobExport(w http.ResponseWriter, r *http.Request, user *domain.User) {
+	job, ok := s.loadOwnedJob(w, r, user)
+	if !ok {
+		return
+	}
+	// Check the directory before streaming: once the zip headers are sent an error can no
+	// longer be reported as a JSON envelope.
+	if _, err := os.ReadDir(job.ArtifactsDir); err != nil {
+		code, status := "EXPORT_ERROR", http.StatusInternalServerError
+		if os.IsNotExist(err) {
+			code, status = "ARTIFACTS_NOT_FOUND", http.StatusNotFound
+		}
+		s.writeError(w, r, status, code, fmt.Sprintf("Artifacts of job %s cannot be read: %v", job.JobID, err), nil)
 		return
 	}
 
@@ -566,17 +759,15 @@ func (s *Server) handleJobExport(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleJobArtifact(w http.ResponseWriter, r *http.Request) {
-	jobID := r.PathValue("job_id")
+func (s *Server) handleJobArtifact(w http.ResponseWriter, r *http.Request, user *domain.User) {
 	artifactID := filepath.Clean(r.PathValue("artifact_id"))
 	if strings.Contains(artifactID, "..") || strings.Contains(artifactID, "/") {
 		s.writeError(w, r, http.StatusForbidden, "INVALID_PATH", "Path traversal forbidden", nil)
 		return
 	}
 
-	job, err := s.store.GetJob(jobID)
-	if err != nil {
-		s.writeError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", fmt.Sprintf("Job %s not found", jobID), nil)
+	job, ok := s.loadOwnedJob(w, r, user)
+	if !ok {
 		return
 	}
 

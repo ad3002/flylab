@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -16,27 +18,73 @@ type Config struct {
 	ContractsDir     string
 	WebDir           string
 	FlysimBin        string
-	OllamaURL        string
-	OllamaModel      string
 	MaxWallSeconds   int
 	MaxRSSBytes      int64
 	MaxArtifactBytes int64
+
+	// Planner (claude -p) settings.
+	ClaudeBin             string
+	ClaudeModel           string
+	ClaudeTimeoutSeconds  int
+	LLMMaxConcurrency     int
+	ParseRateLimitPerHour int
+	// ParseRateLimitPerIPPerHour bounds parses from one client address across all accounts,
+	// ParseGlobalLimitPerHour bounds paid Claude calls for the whole server.
+	ParseRateLimitPerIPPerHour int
+	ParseGlobalLimitPerHour    int
+
+	// Accounts.
+	RegistrationOpen bool
+	// AuthRateLimitPerIP: login + register attempts per client address per 15 minutes.
+	AuthRateLimitPerIP int
+	// LoginFailuresPerUsername: failed logins per username per 15 minutes before that
+	// username is locked until the window passes.
+	LoginFailuresPerUsername int
+	// RegisterRateLimitPerIPPerHour: accounts created per client address per hour.
+	RegisterRateLimitPerIPPerHour int
+	// PasswordHashConcurrency caps concurrent PBKDF2 computations (login + register).
+	PasswordHashConcurrency int
 }
 
-func LoadConfig() *Config {
-	port := 8080
-	if p, err := strconv.Atoi(os.Getenv("PORT")); err == nil {
-		port = p
+// LoadConfig reads the environment. A variable that is unset or empty gets its default;
+// a variable that is set but malformed (e.g. PORT=abc, REGISTRATION_OPEN=maybe) is a
+// startup error instead of being silently replaced by the default.
+func LoadConfig() (*Config, error) {
+	var errs []string
+
+	intVar := func(key string, def, min int) int {
+		raw := strings.TrimSpace(os.Getenv(key))
+		if raw == "" {
+			return def
+		}
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s=%q is not an integer", key, raw))
+			return def
+		}
+		if v < min {
+			errs = append(errs, fmt.Sprintf("%s=%d must be >= %d", key, v, min))
+			return def
+		}
+		return v
 	}
 
-	maxWall := 3600
-	if w, err := strconv.Atoi(os.Getenv("MAX_WALL_SECONDS")); err == nil {
-		maxWall = w
+	boolVar := func(key string, def bool) bool {
+		raw := strings.TrimSpace(os.Getenv(key))
+		if raw == "" {
+			return def
+		}
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s=%q is not a boolean (use true/false)", key, raw))
+			return def
+		}
+		return v
 	}
 
-	return &Config{
+	cfg := &Config{
 		Host:             getEnv("HOST", "0.0.0.0"),
-		Port:             port,
+		Port:             intVar("PORT", 8080, 1),
 		Domain:           getEnv("DOMAIN", "flylab.aglabx.com"),
 		DBPath:           getEnv("DB_PATH", "flylab.db"),
 		DataDir:          getEnv("DATA_DIR", "data"),
@@ -45,12 +93,30 @@ func LoadConfig() *Config {
 		ContractsDir:     getEnv("CONTRACTS_DIR", "contracts"),
 		WebDir:           getEnv("WEB_DIR", "web"),
 		FlysimBin:        getEnv("FLYSIM_BIN", "bin/flysim"),
-		OllamaURL:        getEnv("OLLAMA_URL", "http://127.0.0.1:11434"),
-		OllamaModel:      getEnv("OLLAMA_MODEL", "qwen3:8b"),
-		MaxWallSeconds:   maxWall,
+		MaxWallSeconds:   intVar("MAX_WALL_SECONDS", 3600, 1),
 		MaxRSSBytes:      24 * 1024 * 1024 * 1024, // 24 GB
 		MaxArtifactBytes: 2 * 1024 * 1024 * 1024,  // 2 GB
+
+		ClaudeBin:             getEnv("CLAUDE_BIN", "claude"),
+		ClaudeModel:           getEnv("CLAUDE_MODEL", "claude-sonnet-5-5"),
+		ClaudeTimeoutSeconds:  intVar("CLAUDE_TIMEOUT_SECONDS", 90, 1),
+		LLMMaxConcurrency:     intVar("LLM_MAX_CONCURRENCY", 2, 1),
+		ParseRateLimitPerHour: intVar("PARSE_RATE_LIMIT_PER_HOUR", 60, 1),
+
+		ParseRateLimitPerIPPerHour: intVar("PARSE_RATE_LIMIT_PER_IP_PER_HOUR", 120, 1),
+		ParseGlobalLimitPerHour:    intVar("PARSE_GLOBAL_LIMIT_PER_HOUR", 300, 1),
+
+		RegistrationOpen:              boolVar("REGISTRATION_OPEN", true),
+		AuthRateLimitPerIP:            intVar("AUTH_RATE_LIMIT_PER_IP", 30, 1),
+		LoginFailuresPerUsername:      intVar("LOGIN_FAILURES_PER_USERNAME", 10, 1),
+		RegisterRateLimitPerIPPerHour: intVar("REGISTER_RATE_LIMIT_PER_IP_PER_HOUR", 5, 1),
+		PasswordHashConcurrency:       intVar("PASSWORD_HASH_CONCURRENCY", 4, 1),
 	}
+
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("invalid configuration: %s", strings.Join(errs, "; "))
+	}
+	return cfg, nil
 }
 
 func getEnv(key, defaultVal string) string {

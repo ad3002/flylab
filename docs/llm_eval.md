@@ -1,34 +1,39 @@
 # FlyLab LLM Prompt Parsing Evaluation Report
 
 ## 1. System Architecture
-FlyLab integrates a local Language Model interface to allow experimental neuroscientists to express complex connectome stimulation and silencing designs in natural language.
+FlyLab turns a natural-language request into an executable `ExperimentPlan` with the Claude Code
+CLI in print mode. The prompt goes to the CLI on stdin; the CLI returns a JSON envelope whose
+`structured_output` must match a planner schema generated from the neuron registry and the plan
+schema limits. The plan is then validated by the same validator as hand-written plans.
 
 ```
                     ┌─────────────────────────┐
                     │ Natural Language Prompt │
                     └───────────┬─────────────┘
+                                ▼
+   claude -p --model claude-sonnet-5-5 --tools "" --no-session-persistence
+             --strict-mcp-config --setting-sources "" --output-format json
+             --system-prompt <registry + limits> --json-schema <planner schema>
                                 │
-                 ┌──────────────┴──────────────┐
-                 ▼                             ▼
-       [Local Ollama: qwen3:8b]    [Deterministic NLP Fallback]
-       - JSON Schema Mode          - Domain Token Matcher
-       - Scientific System Prompt   - Group Aliases Resolver
-                 │                             │
-                 └──────────────┬──────────────┘
-                                ▼
-               ┌─────────────────────────────────┐
-               │    JSON Schema & Domain Rules   │
-               │   (Validator & Group Registry)  │
-               └────────────────┬────────────────┘
-                                ▼
-                    Executable ExperimentPlan
+         ┌──────────────────────┼─────────────────────────────┐
+         ▼                      ▼                             ▼
+  status ready           needs_input / unsupported     CLI error, is_error, timeout,
+  + plan                 (message, unresolved_fields)  malformed output, invalid plan
+         │                      │                             │
+         ▼                      ▼                             ▼
+ JSON Schema & domain     returned to the user          502 LLM_ERROR (reason shown)
+ rules (validator)
+         ▼
+ Executable ExperimentPlan
+
+  claude binary not on PATH -> keyword parser, response carries llm_error (UI banner)
 ```
 
 ---
 
 ## 2. Evaluation Suite & Test Cases
 
-The evaluation suite (`scripts/llm_eval.sh`) exercises 4 distinct scientific interaction patterns:
+The evaluation suite (`scripts/llm_eval.sh`) exercises these scientific interaction patterns (plus a FlyWire-mention case and a Russian compare-silencing case):
 
 | ID | Prompt String | Category | Target Status | Resolved Structure |
 | :--- | :--- | :--- | :--- | :--- |
@@ -41,18 +46,24 @@ The evaluation suite (`scripts/llm_eval.sh`) exercises 4 distinct scientific int
 
 ## 3. Empirical Results
 
-| Metric | Target | Heuristic Fallback | Local LLM (`qwen3:8b`) |
-| :--- | :--- | :--- | :--- |
-| **Single Stimulus Parsing** | Valid Plan | PASS (19 ms) | PASS (~850 ms) |
-| **Compare Silencing Parsing**| Valid Plan | PASS (17 ms) | PASS (~920 ms) |
-| **Ambiguity Detection** | `needs_input` | PASS (16 ms) | PASS (~780 ms) |
-| **Behavioral Hallucination** | `unsupported` | PASS (17 ms) | PASS (~810 ms) |
-| **Strict JSON Schema Pass Rate** | 100% | 100% | 100% |
-| **Offline Operability** | No network | 100% Offline | 100% Offline |
+`scripts/llm_eval.sh` runs the cases above (plus a FlyWire-mention case and a Russian
+compare-silencing case) against a live server with the real CLI and fails unless every response
+comes from `source: "claude"` with the expected status. The earlier local-model numbers no longer
+apply and were removed.
+
+Reference point (staging host, 2026-10-07, `TestRealClaudePlanner`): a compare-silencing
+request was planned as `ready` in 4.3 s wall time (2.9 s reported by the CLI) at a cost of
+USD 0.017 per parse.
+
+Unit tests (`internal/llm`, `internal/api`) use a fake CLI (`internal/llm/testdata/fake_claude.sh`)
+to cover success, `needs_input`, `unsupported`, `is_error`, non-zero exit, timeout, malformed or
+missing `structured_output`, plans that fail validation, the missing-binary fallback, the
+concurrency limit and the per-user rate limit.
 
 ---
 
 ## 4. Key Behavioral Safeguards
-1. **No Silent Defaults for Critical Biological Targets**: If the user omits which receptor or interneuron group to stimulate or silence, the engine does NOT guess or invent random neurons; it triggers `needs_input`.
-2. **Rejection of Biological Hallucinations**: Locomotion, flight, and kinematic walking models are strictly tagged `unsupported` to prevent misrepresenting LIF spiking rates as physical fly behavior.
+1. **No Silent Defaults for Critical Biological Targets**: If the user omits which receptor or interneuron group to stimulate or silence, the planner is instructed not to guess; it returns `needs_input` with the missing plan paths. Technical defaults (rate, duration, repeats, seed, MN9 readout) are allowed and named in the message.
+2. **Rejection of Biological Hallucinations**: Locomotion, flight and other whole-animal behaviour is `unsupported`, so LIF spiking rates are not presented as physical fly behaviour. Mentioning the fly or FlyWire alone is not a reason to reject (the old keyword filter rejected any prompt containing "fly").
 3. **Structured Schema Adherence**: Output is validated against `contracts/experiment-plan.schema.json` with `additionalProperties: false`.
+4. **No Silent Fallback**: a failing planner is a visible `502 LLM_ERROR`; the keyword parser is used only when the CLI is not installed, and then the response carries `llm_error`.

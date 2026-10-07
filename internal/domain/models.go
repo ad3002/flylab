@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Selector specifies either a named group_id or an explicit array of neuron_ids.
 type Selector struct {
@@ -72,19 +75,63 @@ const (
 )
 
 type Job struct {
-	JobID          string    `json:"job_id"`
-	PlanID         string    `json:"plan_id"`
-	PlanHash       string    `json:"plan_hash"`
-	Status         JobStatus `json:"status"`
-	Stage          string    `json:"stage"` // loading, building, simulating, aggregating, exporting
-	ProgressPct    float64   `json:"progress_pct"`
-	IdempotencyKey *string   `json:"idempotency_key,omitempty"`
-	ErrorMessage   *string   `json:"error_message,omitempty"`
-	ErrorCode      *string   `json:"error_code,omitempty"`
-	ArtifactsDir   string    `json:"artifacts_dir"`
-	CreatedAt      time.Time `json:"created_at"`
+	JobID          string     `json:"job_id"`
+	PlanID         string     `json:"plan_id"`
+	PlanHash       string     `json:"plan_hash"`
+	Status         JobStatus  `json:"status"`
+	Stage          string     `json:"stage"` // loading, building, simulating, aggregating, exporting
+	ProgressPct    float64    `json:"progress_pct"`
+	IdempotencyKey *string    `json:"idempotency_key,omitempty"`
+	ErrorMessage   *string    `json:"error_message,omitempty"`
+	ErrorCode      *string    `json:"error_code,omitempty"`
+	ArtifactsDir   string     `json:"artifacts_dir"`
+	CreatedAt      time.Time  `json:"created_at"`
 	StartedAt      *time.Time `json:"started_at,omitempty"`
 	FinishedAt     *time.Time `json:"finished_at,omitempty"`
+	// Prompt and Title are the user's natural-language request and a human label (nullable).
+	Prompt *string `json:"prompt"`
+	Title  *string `json:"title"`
+	// UserID is the owner; never serialised (ownership is enforced, not exposed).
+	UserID *int64 `json:"-"`
+}
+
+// User is the public view of an account. The password hash is never part of it.
+type User struct {
+	ID          int64     `json:"id"`
+	Username    string    `json:"username"`
+	DisplayName string    `json:"display_name"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// UserStats aggregates the caller's jobs for GET /api/v1/me.
+// Running counts every non-terminal job (queued, running, cancelling).
+type UserStats struct {
+	TotalJobs int        `json:"total_jobs"`
+	Succeeded int        `json:"succeeded"`
+	Failed    int        `json:"failed"`
+	Running   int        `json:"running"`
+	LastJobAt *time.Time `json:"last_job_at"`
+}
+
+// JobSummary is the compact result shown in the history list. TotalSpikesB is null for
+// "single" experiments (there is no condition B); flysim writes it as null there.
+type JobSummary struct {
+	TotalSpikesA        int64           `json:"total_spikes_A"`
+	TotalSpikesB        *int64          `json:"total_spikes_B"`
+	ActiveNeuronsCountA int64           `json:"active_neurons_count_A"`
+	ActiveNeuronsCountB int64           `json:"active_neurons_count_B"`
+	ReadoutSummary      json.RawMessage `json:"readout_summary"`
+}
+
+// HistoryJob is the job shape of GET /api/v1/jobs and GET /api/v1/jobs/{id}.
+// SummaryError / PlanError are set when the authoritative source exists but cannot be
+// read or parsed, so corruption is visible to the user instead of silently dropped.
+type HistoryJob struct {
+	*Job
+	Plan         *ExperimentPlan `json:"plan"`
+	PlanError    *string         `json:"plan_error"`
+	Summary      *JobSummary     `json:"summary"`
+	SummaryError *string         `json:"summary_error"`
 }
 
 type NeuronGroup struct {

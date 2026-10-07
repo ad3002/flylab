@@ -14,10 +14,14 @@ import (
 )
 
 var (
-	ErrNotFound       = errors.New("resource not found")
-	ErrConflict       = errors.New("resource conflict")
-	ErrInvalidState   = errors.New("invalid state transition")
+	ErrNotFound      = errors.New("resource not found")
+	ErrConflict      = errors.New("resource conflict")
+	ErrInvalidState  = errors.New("invalid state transition")
+	ErrUsernameTaken = errors.New("username already taken")
 )
+
+// jobColumns is the column list every job SELECT uses (must match scanJob).
+const jobColumns = `job_id, plan_id, plan_hash, status, stage, progress_pct, idempotency_key, error_code, error_message, artifacts_dir, created_at, started_at, finished_at, user_id, prompt, title`
 
 type Store struct {
 	db *sql.DB
@@ -80,11 +84,89 @@ func (s *Store) initSchema() error {
 		created_at TIMESTAMP NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS users (
+		id INTEGER PRIMARY KEY,
+		username TEXT UNIQUE NOT NULL,
+		display_name TEXT NOT NULL,
+		password_hash TEXT NOT NULL,
+		created_at TIMESTAMP NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS sessions (
+		token_hash TEXT PRIMARY KEY,
+		user_id INTEGER NOT NULL,
+		created_at TIMESTAMP NOT NULL,
+		expires_at TIMESTAMP NOT NULL
+	);
+
+	-- Idempotency keys scoped per user: the same key from two users never collides.
+	CREATE TABLE IF NOT EXISTS user_idempotency_keys (
+		user_id INTEGER NOT NULL,
+		key TEXT NOT NULL,
+		job_id TEXT NOT NULL,
+		plan_id TEXT NOT NULL,
+		created_at TIMESTAMP NOT NULL,
+		PRIMARY KEY (user_id, key)
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 	CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+	CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 	`
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return fmt.Errorf("create schema: %w", err)
+	}
+	if err := s.migrateJobsColumns(); err != nil {
+		return fmt.Errorf("migrate jobs table: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_user_created ON jobs(user_id, created_at)`); err != nil {
+		return fmt.Errorf("create jobs(user_id) index: %w", err)
+	}
+	return nil
+}
+
+// migrateJobsColumns adds user_id, prompt and title to an existing jobs table, only when
+// PRAGMA table_info shows they are missing. Any failure is returned (startup error).
+func (s *Store) migrateJobsColumns() error {
+	rows, err := s.db.Query(`PRAGMA table_info(jobs)`)
+	if err != nil {
+		return fmt.Errorf("PRAGMA table_info(jobs): %w", err)
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notnull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan table_info(jobs): %w", err)
+		}
+		have[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate table_info(jobs): %w", err)
+	}
+	rows.Close()
+
+	for _, col := range []struct{ name, ddl string }{
+		{"user_id", `ALTER TABLE jobs ADD COLUMN user_id INTEGER`},
+		{"prompt", `ALTER TABLE jobs ADD COLUMN prompt TEXT`},
+		{"title", `ALTER TABLE jobs ADD COLUMN title TEXT`},
+	} {
+		if have[col.name] {
+			continue
+		}
+		if _, err := s.db.Exec(col.ddl); err != nil {
+			return fmt.Errorf("%s: %w", col.ddl, err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) SavePlan(plan *domain.ExperimentPlan, resolved *domain.ResolvedPlan) error {
@@ -158,6 +240,9 @@ func (s *Store) GetResolvedPlan(planID string) (*domain.ResolvedPlan, error) {
 	return &resolved, nil
 }
 
+// CreateJob inserts a job. When idempotencyKey is set the key is scoped to job.UserID:
+// the same key and plan from the same user returns the existing job (isNew=false), the same
+// key with a different plan is ErrConflict, and the same key from another user is unrelated.
 func (s *Store) CreateJob(job *domain.Job, idempotencyKey *string) (*domain.Job, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -169,10 +254,15 @@ func (s *Store) CreateJob(job *domain.Job, idempotencyKey *string) (*domain.Job,
 	defer tx.Rollback()
 
 	if idempotencyKey != nil && *idempotencyKey != "" {
+		if job.UserID == nil {
+			return nil, false, errors.New("idempotency key requires a job owner (user_id)")
+		}
 		var existingJobID, existingPlanID string
-		err := tx.QueryRow(`SELECT job_id, plan_id FROM idempotency_keys WHERE key = ?`, *idempotencyKey).Scan(&existingJobID, &existingPlanID)
+		err := tx.QueryRow(
+			`SELECT job_id, plan_id FROM user_idempotency_keys WHERE user_id = ? AND key = ?`,
+			*job.UserID, *idempotencyKey,
+		).Scan(&existingJobID, &existingPlanID)
 		if err == nil {
-			// Found idempotency key!
 			if existingPlanID != job.PlanID {
 				return nil, false, ErrConflict // same key with different plan
 			}
@@ -180,15 +270,14 @@ func (s *Store) CreateJob(job *domain.Job, idempotencyKey *string) (*domain.Job,
 			if err != nil {
 				return nil, false, err
 			}
-			return existingJob, false, nil // return existing job (idempotent duplicate)
+			return existingJob, false, nil // idempotent duplicate
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return nil, false, err
 		}
 
-		// Insert new idempotency key
 		_, err = tx.Exec(
-			`INSERT INTO idempotency_keys (key, job_id, plan_id, created_at) VALUES (?, ?, ?, ?)`,
-			*idempotencyKey, job.JobID, job.PlanID, time.Now().UTC(),
+			`INSERT INTO user_idempotency_keys (user_id, key, job_id, plan_id, created_at) VALUES (?, ?, ?, ?, ?)`,
+			*job.UserID, *idempotencyKey, job.JobID, job.PlanID, time.Now().UTC(),
 		)
 		if err != nil {
 			return nil, false, err
@@ -196,9 +285,10 @@ func (s *Store) CreateJob(job *domain.Job, idempotencyKey *string) (*domain.Job,
 	}
 
 	_, err = tx.Exec(
-		`INSERT INTO jobs (job_id, plan_id, plan_hash, status, stage, progress_pct, idempotency_key, artifacts_dir, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		job.JobID, job.PlanID, job.PlanHash, string(job.Status), job.Stage, job.ProgressPct, idempotencyKey, job.ArtifactsDir, job.CreatedAt,
+		`INSERT INTO jobs (job_id, plan_id, plan_hash, status, stage, progress_pct, idempotency_key, artifacts_dir, created_at, user_id, prompt, title)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.JobID, job.PlanID, job.PlanHash, string(job.Status), job.Stage, job.ProgressPct, idempotencyKey,
+		job.ArtifactsDir, job.CreatedAt, job.UserID, job.Prompt, job.Title,
 	)
 	if err != nil {
 		return nil, false, err
@@ -213,39 +303,93 @@ func (s *Store) CreateJob(job *domain.Job, idempotencyKey *string) (*domain.Job,
 
 func (s *Store) getJobTx(tx *sql.Tx, jobID string) (*domain.Job, error) {
 	row := tx.QueryRow(
-		`SELECT job_id, plan_id, plan_hash, status, stage, progress_pct, idempotency_key, error_code, error_message, artifacts_dir, created_at, started_at, finished_at
-		 FROM jobs WHERE job_id = ?`, jobID,
+		`SELECT `+jobColumns+` FROM jobs WHERE job_id = ?`, jobID,
 	)
 	return scanJob(row)
 }
 
 func (s *Store) GetJob(jobID string) (*domain.Job, error) {
 	row := s.db.QueryRow(
-		`SELECT job_id, plan_id, plan_hash, status, stage, progress_pct, idempotency_key, error_code, error_message, artifacts_dir, created_at, started_at, finished_at
-		 FROM jobs WHERE job_id = ?`, jobID,
+		`SELECT `+jobColumns+` FROM jobs WHERE job_id = ?`, jobID,
 	)
 	return scanJob(row)
 }
 
-func (s *Store) ListJobs(limit, offset int) ([]*domain.Job, error) {
+// GetJobForUser returns the job only when it belongs to userID. A job owned by someone else
+// or by nobody is ErrNotFound (existence is not leaked).
+func (s *Store) GetJobForUser(jobID string, userID int64) (*domain.Job, error) {
+	row := s.db.QueryRow(`SELECT `+jobColumns+` FROM jobs WHERE job_id = ? AND user_id = ?`, jobID, userID)
+	return scanJob(row)
+}
+
+// ListJobsForUser returns the caller's jobs newest first plus the total matching count.
+// status == "" means all statuses.
+func (s *Store) ListJobsForUser(userID int64, status string, limit, offset int) ([]*domain.Job, int, error) {
+	where := `WHERE user_id = ?`
+	args := []interface{}{userID}
+	if status != "" {
+		where += ` AND status = ?`
+		args = append(args, status)
+	}
+
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM jobs `+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count jobs: %w", err)
+	}
+
 	rows, err := s.db.Query(
-		`SELECT job_id, plan_id, plan_hash, status, stage, progress_pct, idempotency_key, error_code, error_message, artifacts_dir, created_at, started_at, finished_at
-		 FROM jobs ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset,
+		`SELECT `+jobColumns+` FROM jobs `+where+` ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?`,
+		append(args, limit, offset)...,
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, fmt.Errorf("list jobs: %w", err)
 	}
 	defer rows.Close()
 
-	var jobs []*domain.Job
+	jobs := make([]*domain.Job, 0)
 	for rows.Next() {
 		j, err := scanJob(rows)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		jobs = append(jobs, j)
 	}
-	return jobs, nil
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate jobs: %w", err)
+	}
+	return jobs, total, nil
+}
+
+// UserStats aggregates the user's jobs for GET /api/v1/me.
+func (s *Store) UserStats(userID int64) (*domain.UserStats, error) {
+	var st domain.UserStats
+	var succeeded, failed, running sql.NullInt64
+	err := s.db.QueryRow(
+		`SELECT COUNT(*),
+		        SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END),
+		        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END),
+		        SUM(CASE WHEN status IN ('queued', 'running', 'cancelling') THEN 1 ELSE 0 END)
+		   FROM jobs WHERE user_id = ?`, userID,
+	).Scan(&st.TotalJobs, &succeeded, &failed, &running)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate user jobs: %w", err)
+	}
+	st.Succeeded = int(succeeded.Int64)
+	st.Failed = int(failed.Int64)
+	st.Running = int(running.Int64)
+
+	var last sql.NullTime
+	err = s.db.QueryRow(
+		`SELECT created_at FROM jobs WHERE user_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`, userID,
+	).Scan(&last)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("last job time: %w", err)
+	}
+	if last.Valid {
+		t := last.Time
+		st.LastJobAt = &t
+	}
+	return &st, nil
 }
 
 func (s *Store) DequeueNextJob() (*domain.Job, error) {
@@ -304,11 +448,21 @@ func (s *Store) CompleteJob(jobID string, status domain.JobStatus, errCode, errM
 	defer s.mu.Unlock()
 
 	now := time.Now().UTC()
-	_, err := s.db.Exec(
+	res, err := s.db.Exec(
 		`UPDATE jobs SET status = ?, error_code = ?, error_message = ?, progress_pct = 100.0, finished_at = ? WHERE job_id = ?`,
 		string(status), errCode, errMsg, now, jobID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("complete job %s: rows affected unknown: %w", jobID, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("complete job %s: %w", jobID, ErrNotFound)
+	}
+	return nil
 }
 
 func (s *Store) CancelJob(jobID string) (*domain.Job, error) {
@@ -350,7 +504,10 @@ func (s *Store) RecoverOrphanJobs() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	affected, _ := res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("recover orphan jobs: rows affected unknown: %w", err)
+	}
 	return int(affected), nil
 }
 
@@ -362,11 +519,13 @@ func scanJob(s rowScanner) (*domain.Job, error) {
 	var j domain.Job
 	var statusStr string
 	var startedAt, finishedAt sql.NullTime
-	var idempKey, errCode, errMsg sql.NullString
+	var idempKey, errCode, errMsg, prompt, title sql.NullString
+	var userID sql.NullInt64
 
 	err := s.Scan(
 		&j.JobID, &j.PlanID, &j.PlanHash, &statusStr, &j.Stage, &j.ProgressPct,
 		&idempKey, &errCode, &errMsg, &j.ArtifactsDir, &j.CreatedAt, &startedAt, &finishedAt,
+		&userID, &prompt, &title,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -390,6 +549,16 @@ func scanJob(s rowScanner) (*domain.Job, error) {
 	}
 	if finishedAt.Valid {
 		j.FinishedAt = &finishedAt.Time
+	}
+	if userID.Valid {
+		uid := userID.Int64
+		j.UserID = &uid
+	}
+	if prompt.Valid {
+		j.Prompt = &prompt.String
+	}
+	if title.Valid {
+		j.Title = &title.String
 	}
 
 	return &j, nil

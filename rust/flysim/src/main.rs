@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 
 use flysim::graph::ConnectomeGraph;
 use flysim::input::{
-    generate_deterministic_events, index_events_by_tick, load_events_from_parquet,
-    save_events_to_parquet,
+    generate_deterministic_events_with_rates, index_events_by_tick, load_events_from_parquet,
+    save_events_to_parquet, stimulation_rates,
 };
 use flysim::manifest::{DatasetManifest, ResolvedPlan};
 use flysim::model::{AnalyticalCoefficients, LifParameters, NetworkState};
@@ -77,6 +77,34 @@ fn emit_event(event_type: &str, stage: &str, progress_pct: f64, details: serde_j
     });
     println!("{}", msg);
     let _ = std::io::stdout().flush();
+}
+
+/// Maps root ids to graph indices; any id absent from the graph is an error listing them.
+fn require_indices(
+    graph: &ConnectomeGraph,
+    ids: &[String],
+    what: &str,
+) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
+    let mut indices = Vec::with_capacity(ids.len());
+    let mut missing = Vec::new();
+    for id in ids {
+        match graph.id_to_index.get(id) {
+            Some(&i) => indices.push(i),
+            None => missing.push(id.as_str()),
+        }
+    }
+    if !missing.is_empty() {
+        let shown: Vec<&str> = missing.iter().take(5).copied().collect();
+        return Err(format!(
+            "{} {} neuron id(s) are not in the connectome graph: {}{}",
+            missing.len(),
+            what,
+            shown.join(", "),
+            if missing.len() > 5 { ", ..." } else { "" }
+        )
+        .into());
+    }
+    Ok(indices)
 }
 
 fn compute_sha256(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
@@ -217,6 +245,14 @@ fn generate_report_markdown(
     md.push_str(&format!("- **Duration**: `{:.1} ms`\n", plan.duration_ms));
     md.push_str(&format!("- **Repeats**: `{}`\n", plan.repeats));
     md.push_str(&format!("- **Base Seed**: `{}`\n", plan.base_seed));
+    for (idx, act) in plan.activation.iter().enumerate() {
+        md.push_str(&format!(
+            "- **Stimulation set {}**: `{}` neurons at `{:.1} Hz`\n",
+            idx + 1,
+            act.neuron_ids.len(),
+            act.rate_hz
+        ));
+    }
     md.push_str(&format!("- **Total Wall Time**: `{:.2} s`\n\n", wall_sec));
 
     md.push_str("## 2. Readout Neurons Activity\n\n");
@@ -362,36 +398,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let params = LifParameters::default();
             let coeffs = AnalyticalCoefficients::new(&params);
 
-            // Collect stimulated IDs
-            let mut stimulated_ids = Vec::new();
-            for act in &plan.activation {
-                stimulated_ids.extend(act.neuron_ids.clone());
-            }
-            stimulated_ids.sort();
-            stimulated_ids.dedup();
+            // Per-neuron stimulation rates: every activation set keeps its own rate_hz.
+            let stimulation = stimulation_rates(&plan.activation)
+                .map_err(|e| format!("invalid activation in resolved plan: {e}"))?;
+            let stimulated_ids: Vec<String> = stimulation.iter().map(|(id, _)| id.clone()).collect();
 
-            let stimulated_indices: Vec<usize> = stimulated_ids
-                .iter()
-                .filter_map(|id| graph.id_to_index.get(id).copied())
-                .collect();
-
-            // Collect silenced indices
-            let silenced_indices: HashSet<usize> = plan
-                .silencing_neuron_ids
-                .iter()
-                .filter_map(|id| graph.id_to_index.get(id).copied())
-                .collect();
+            // Every neuron the plan names must exist in the loaded graph: a missing id would
+            // otherwise be dropped and the run would silently differ from the plan.
+            let stimulated_indices = require_indices(&graph, &stimulated_ids, "stimulated")?;
+            let silenced_indices: HashSet<usize> =
+                require_indices(&graph, &plan.silencing_neuron_ids, "silenced")?.into_iter().collect();
+            require_indices(&graph, &plan.readout_neuron_ids, "readout")?;
 
             // Generate deterministic input events for trial 0..repeats
             emit_event("progress", "simulating", 25.0, json!({"msg": "Generating stimulus events"}));
             let mut all_events = Vec::new();
             for trial in 0..plan.repeats {
                 let trial_seed = plan.base_seed + trial as u64;
-                let rate = plan.activation.first().map(|a| a.rate_hz).unwrap_or(50.0);
-                let events = generate_deterministic_events(
-                    &stimulated_ids,
+                let events = generate_deterministic_events_with_rates(
+                    &stimulation,
                     plan.duration_ms,
-                    rate,
                     trial_seed,
                     params.dt_ms,
                     trial,
@@ -412,7 +438,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     30.0 + (trial as f64 / plan.repeats as f64) * 30.0,
                     json!({"condition": "A", "trial": trial}),
                 );
-                let events_map = index_events_by_tick(&all_events, &graph.id_to_index, trial);
+                let events_map = index_events_by_tick(&all_events, &graph.id_to_index, trial)?;
                 let (spikes_a, cnt) = simulate_single_condition(
                     &graph,
                     &params,
@@ -438,7 +464,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         65.0 + (trial as f64 / plan.repeats as f64) * 25.0,
                         json!({"condition": "B", "trial": trial}),
                     );
-                    let events_map = index_events_by_tick(&all_events, &graph.id_to_index, trial);
+                    let events_map = index_events_by_tick(&all_events, &graph.id_to_index, trial)?;
                     let (spikes_b, cnt) = simulate_single_condition(
                         &graph,
                         &params,
@@ -679,23 +705,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             stimulated_ids.sort();
             stimulated_ids.dedup();
-            let stimulated_indices: Vec<usize> = stimulated_ids
-                .iter()
-                .filter_map(|id| graph.id_to_index.get(id).copied())
-                .collect();
-
-            let silenced_indices: HashSet<usize> = plan
-                .silencing_neuron_ids
-                .iter()
-                .filter_map(|id| graph.id_to_index.get(id).copied())
-                .collect();
+            // Same rule as `run`: a plan neuron missing from this graph (other cache, merged or
+            // split root id) fails the replay instead of silently simulating a smaller plan.
+            let stimulated_indices = require_indices(&graph, &stimulated_ids, "stimulated")?;
+            let silenced_indices: HashSet<usize> =
+                require_indices(&graph, &plan.silencing_neuron_ids, "silenced")?.into_iter().collect();
+            require_indices(&graph, &plan.readout_neuron_ids, "readout")?;
 
             let mut all_spikes = Vec::new();
             let mut total_spikes_a = 0;
             let mut total_spikes_b: Option<usize> = None;
 
             for trial in 0..plan.repeats {
-                let events_map = index_events_by_tick(&all_events, &graph.id_to_index, trial);
+                let events_map = index_events_by_tick(&all_events, &graph.id_to_index, trial)?;
                 let (spikes_a, cnt) = simulate_single_condition(
                     &graph,
                     &params,
@@ -714,7 +736,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if plan.experiment_type == "compare_silencing" {
                 let mut b_count = 0;
                 for trial in 0..plan.repeats {
-                    let events_map = index_events_by_tick(&all_events, &graph.id_to_index, trial);
+                    let events_map = index_events_by_tick(&all_events, &graph.id_to_index, trial)?;
                     let (spikes_b, cnt) = simulate_single_condition(
                         &graph,
                         &params,

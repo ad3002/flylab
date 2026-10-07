@@ -18,19 +18,13 @@ services:
       - DB_PATH=/app/data/flylab.db
       - DATA_DIR=/app/data
       - ARTIFACTS_DIR=/app/artifacts
-      - OLLAMA_URL=http://ollama:11434
-      - OLLAMA_MODEL=qwen3:8b
-
-  ollama:
-    image: ollama/ollama:latest
-    container_name: flylab-ollama
-    restart: unless-stopped
-    profiles:
-      - llm
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_models:/root/.ollama
+      # Planner: Claude Code CLI (`claude -p`); see the Dockerfile note about providing it.
+      - CLAUDE_BIN=${CLAUDE_BIN:-claude}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-5-5}
+      - CLAUDE_TIMEOUT_SECONDS=${CLAUDE_TIMEOUT_SECONDS:-90}
+      - LLM_MAX_CONCURRENCY=${LLM_MAX_CONCURRENCY:-2}
+      - PARSE_RATE_LIMIT_PER_HOUR=${PARSE_RATE_LIMIT_PER_HOUR:-60}
+      - REGISTRATION_OPEN=${REGISTRATION_OPEN:-true}
 
   reference:
     build:
@@ -44,6 +38,3 @@ services:
       - ./data:/app/data
       - ./reference:/app/reference
       - ./artifacts:/app/artifacts
-
-volumes:
-  ollama_models:

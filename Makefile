@@ -1,4 +1,4 @@
-.PHONY: all setup data up up-llm smoke test reference-check llm-eval benchmark replay clean
+.PHONY: all setup data up smoke seed test reference-check llm-eval benchmark replay clean
 
 SHELL := /bin/bash
 
@@ -26,19 +26,12 @@ up:
 		./bin/flylab; \
 	fi
 
-up-llm:
-	@echo "Checking Ollama status..."
-	@if curl -s http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then \
-		echo "Ollama is running. Pulling qwen3:8b model..."; \
-		curl -s -X POST http://127.0.0.1:11434/api/pull -d '{"name": "qwen3:8b"}'; \
-	else \
-		echo "Starting Ollama via docker compose profile 'llm'..."; \
-		docker compose --profile llm up -d ollama; \
-		docker compose exec ollama ollama pull qwen3:8b; \
-	fi
-
 smoke:
 	@./scripts/smoke.sh
+
+# Seed demo history into a running server: make seed BASE_URL=http://127.0.0.1:8080 PASSWORD=...
+seed:
+	@python3 scripts/seed_demo.py --base-url $${BASE_URL:-http://127.0.0.1:8080} --password "$${PASSWORD:?set PASSWORD}"
 
 test:
 	@echo "=== Running Go unit and integration tests ==="

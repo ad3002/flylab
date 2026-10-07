@@ -54,6 +54,96 @@ func LoadRegistry(registryDir string) (*Registry, error) {
 type Validator struct {
 	schema   *jsonschema.Schema
 	registry *Registry
+	limits   PlanLimits
+}
+
+// PlanLimits are the numeric limits of contracts/experiment-plan.schema.json, read from the
+// schema file itself so the planner prompt can never drift from what the validator enforces.
+type PlanLimits struct {
+	ExperimentTypes []string
+	RateMinHz       float64
+	RateMaxHz       float64
+	DurationMinMs   float64
+	DurationMaxMs   float64
+	RepeatsMin      int
+	RepeatsMax      int
+	ActivationMax   int
+	BaseSeedMax     int64
+}
+
+// Limits returns the schema limits.
+func (v *Validator) Limits() PlanLimits { return v.limits }
+
+func loadPlanLimits(schemaPath string) (PlanLimits, error) {
+	raw, err := os.ReadFile(schemaPath)
+	if err != nil {
+		return PlanLimits{}, fmt.Errorf("read schema: %w", err)
+	}
+	type numProp struct {
+		Minimum  *float64 `json:"minimum"`
+		Maximum  *float64 `json:"maximum"`
+		MaxItems *int     `json:"maxItems"`
+		Enum     []string `json:"enum"`
+		Items    *struct {
+			Properties map[string]numProp `json:"properties"`
+		} `json:"items"`
+	}
+	var doc struct {
+		Properties map[string]numProp `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return PlanLimits{}, fmt.Errorf("parse schema: %w", err)
+	}
+	var missing []string
+	get := func(name string) numProp {
+		p, ok := doc.Properties[name]
+		if !ok {
+			missing = append(missing, name)
+		}
+		return p
+	}
+	num := func(v *float64, what string) float64 {
+		if v == nil {
+			missing = append(missing, what)
+			return 0
+		}
+		return *v
+	}
+
+	var l PlanLimits
+	et := get("experiment_type")
+	if len(et.Enum) == 0 {
+		missing = append(missing, "experiment_type.enum")
+	}
+	l.ExperimentTypes = et.Enum
+
+	act := get("activation")
+	if act.MaxItems == nil {
+		missing = append(missing, "activation.maxItems")
+	} else {
+		l.ActivationMax = *act.MaxItems
+	}
+	if act.Items == nil {
+		missing = append(missing, "activation.items")
+	} else {
+		rate := act.Items.Properties["rate_hz"]
+		l.RateMinHz = num(rate.Minimum, "activation.items.rate_hz.minimum")
+		l.RateMaxHz = num(rate.Maximum, "activation.items.rate_hz.maximum")
+	}
+
+	dur := get("duration_ms")
+	l.DurationMinMs = num(dur.Minimum, "duration_ms.minimum")
+	l.DurationMaxMs = num(dur.Maximum, "duration_ms.maximum")
+	rep := get("repeats")
+	l.RepeatsMin = int(num(rep.Minimum, "repeats.minimum"))
+	l.RepeatsMax = int(num(rep.Maximum, "repeats.maximum"))
+	seed := get("base_seed")
+	l.BaseSeedMax = int64(num(seed.Maximum, "base_seed.maximum"))
+
+	if len(missing) > 0 {
+		return PlanLimits{}, fmt.Errorf("schema %s lacks limits: %s", schemaPath, strings.Join(missing, ", "))
+	}
+	return l, nil
 }
 
 func NewValidator(contractsDir string, registry *Registry) (*Validator, error) {
@@ -65,9 +155,15 @@ func NewValidator(contractsDir string, registry *Registry) (*Validator, error) {
 		return nil, fmt.Errorf("failed to compile experiment-plan schema: %w", err)
 	}
 
+	limits, err := loadPlanLimits(schemaPath)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Validator{
 		schema:   schema,
 		registry: registry,
+		limits:   limits,
 	}, nil
 }
 
@@ -156,6 +252,8 @@ func (v *Validator) ValidatePlan(plan *domain.ExperimentPlan) (*ValidationResult
 	// Resolve Selectors
 	var resolvedActivations []domain.ResolvedActivation
 	var allActivationIDs []string
+	// flysim drives each activation set at its own rate, so a neuron may belong to one set only.
+	activationOwner := make(map[string]int)
 
 	for idx, act := range plan.Activation {
 		if act.RateHz <= 0.0 {
@@ -171,6 +269,12 @@ func (v *Validator) ValidatePlan(plan *domain.ExperimentPlan) (*ValidationResult
 		}
 		if len(ids) == 0 || len(ids) > 500 {
 			return nil, fmt.Errorf("activation set must contain 1 to 500 unique neurons (got %d)", len(ids))
+		}
+		for _, id := range ids {
+			if prev, ok := activationOwner[id]; ok {
+				return nil, fmt.Errorf("neuron %s is in both activation[%d] and activation[%d]; each neuron can be driven at only one rate", id, prev, idx)
+			}
+			activationOwner[id] = idx
 		}
 		resolvedActivations = append(resolvedActivations, domain.ResolvedActivation{
 			NeuronIDs: ids,

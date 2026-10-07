@@ -26,10 +26,14 @@ Designed for deployment at **`flylab.aglabx.com`** and public distribution via [
 - **Reproducible Scientific Archives**:
   - Every job packages an immutable ZIP export with `plan.json`, `resolved_plan.json`, `manifest.json`, `input_events.parquet`, `spikes.parquet`, `rates.csv`, `summary.json`, `report.md`, `replay.sh`, and `checksums.sha256`.
   - Replay can be executed on any offline machine with the standalone `flysim` CLI without Python, web servers, or network access.
-- **Local LLM Integration (`internal/llm`)**:
-  - Native integration with local Ollama instances (`qwen3:8b`) to parse natural language requests into structured experiment plans.
-  - Built-in heuristic NLP fallback parser ensuring 100% offline functionality if local LLMs are unavailable.
-  - Zero biological hallucination: rejects whole-animal behavioral queries (`walking`, `flight`) that exceed spiking network scope.
+- **Natural-Language Planner (`internal/llm`)**:
+  - Requests in English or Russian are turned into a structured `ExperimentPlan` by the Claude Code CLI in print mode (`claude -p`, model `claude-sonnet-5-5` by default), constrained by a JSON schema generated from the neuron registry and the plan schema limits; the result is re-validated by the same validator as hand-written plans.
+  - Claude decides `ready` / `needs_input` / `unsupported` (whole-animal behaviour such as walking or flight is out of scope); there are no keyword pre-filters.
+  - No silent fallback: planner failures return `502 LLM_ERROR` with the reason; only a missing `claude` binary switches to a keyword parser, and that response carries a visible `llm_error`.
+  - Global concurrency cap (`LLM_MAX_CONCURRENCY`, `503 LLM_BUSY`) and a per-user hourly limit (`PARSE_RATE_LIMIT_PER_HOUR`, `429 RATE_LIMITED`).
+- **Accounts & History**:
+  - Username/password accounts (PBKDF2-SHA256, 210 000 iterations), 30-day sessions via an `HttpOnly` cookie or `Authorization: Bearer`.
+  - Every job belongs to its creator; other users get `404`. `GET /api/v1/jobs` is a per-user history with the stored plan and a compact result summary (a corrupt `summary.json` is reported in `summary_error`, never dropped).
 - **Zero-Build Web Interface (`web/`)**:
   - Responsive vanilla CSS/JS interface served directly by the Go binary.
   - Visualizes parameter review, real-time stage progress, tabular rate comparison ($\Delta$ Hz), and interactive spike rasters.
@@ -76,7 +80,9 @@ reveals that only **outgoing** connections are zeroed (`i` is the presynaptic in
 │   ├── contracts/           # JSON schema & neuron registry validator
 │   ├── domain/              # Core domain models
 │   ├── export/              # ZIP archive generator
-│   ├── llm/                 # Ollama client & NLP fallback parser
+│   ├── auth/                # Password hashing, session tokens, account rules
+│   ├── cli/                 # `flylab user create|passwd` subcommands
+│   ├── llm/                 # Claude CLI planner (claude -p) & keyword fallback
 │   ├── storage/             # SQLite WAL store & job queue
 │   └── worker/              # Process runner for Rust flysim
 ├── rust/
@@ -92,9 +98,10 @@ reveals that only **outgoing** connections are zeroed (`i` is the presynaptic in
 │   └── templates/           # Server-rendered HTML templates
 ├── scripts/
 │   ├── setup_data.sh        # Dataset downloader & CSR graph cache builder
-│   ├── smoke.sh             # Full end-to-end integration smoke test
+│   ├── smoke.sh             # Full end-to-end integration smoke test (registers a throwaway user)
+│   ├── seed_demo.py         # Demo account + 20 realistic experiments over HTTP
 │   ├── reference_check.sh   # Parity check against Brian2 golden traces
-│   ├── llm_eval.sh          # Prompt parsing evaluation suite
+│   ├── llm_eval.sh          # Prompt parsing evaluation suite (real claude -p)
 │   ├── benchmark.sh         # Performance & RSS memory benchmark
 │   └── replay.sh            # Standalone offline replay tool
 ├── docs/
@@ -116,7 +123,8 @@ reveals that only **outgoing** connections are zeroed (`i` is the presynaptic in
 
 ### Prerequisites
 - **Rust Toolchain**: `rustc` and `cargo` $\ge 1.80$
-- **Go Toolchain**: `go` $\ge 1.22$
+- **Go Toolchain**: `go` $\ge 1.26$ (stdlib `crypto/pbkdf2`)
+- **Claude Code CLI** (`claude`) on `PATH` for the natural-language planner (optional: without it `/plans/parse` uses a keyword parser and says so in `llm_error`)
 - **Disk Space**: ~450 MB for FlyWire data files, ~176 MB for CSR binary cache, ~30 MB for compiled binaries.
 
 ### 1. Build Binaries
@@ -147,7 +155,39 @@ make benchmark
 ```bash
 make up
 ```
-Open your browser at **`http://127.0.0.1:8080`** (or domain `flylab.aglabx.com`).
+Open your browser at **`http://127.0.0.1:8080`** (landing page) and **`/app`** (application).
+
+### 5. Accounts and Demo Data
+```bash
+# create an account from the shell (works with REGISTRATION_OPEN=false too)
+bin/flylab user create --username alice --password 'a-long-password' --display-name 'Alice'
+bin/flylab user passwd --username alice --password 'a-new-password'   # also revokes her sessions
+
+# fill a running server with a demo account and 20 finished experiments
+python3 scripts/seed_demo.py --base-url http://127.0.0.1:8080 --password 'demo-password'
+```
+
+### Configuration
+
+All settings are environment variables (see `.env.example`). A variable that is set but malformed
+(e.g. `PORT=abc`) stops the server at startup instead of silently falling back to the default.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `HOST`, `PORT` | `0.0.0.0`, `8080` | listen address |
+| `DB_PATH`, `DATA_DIR`, `ARTIFACTS_DIR` | `flylab.db`, `data`, `artifacts` | storage locations |
+| `FLYSIM_BIN`, `MAX_WALL_SECONDS` | `bin/flysim`, `3600` | simulator binary and per-job wall limit |
+| `CLAUDE_BIN`, `CLAUDE_MODEL` | `claude`, `claude-sonnet-5-5` | planner CLI and model |
+| `CLAUDE_TIMEOUT_SECONDS` | `90` | hard timeout per parse |
+| `LLM_MAX_CONCURRENCY` | `2` | concurrent `claude -p` processes (wait up to 30 s, then `503 LLM_BUSY`) |
+| `PARSE_RATE_LIMIT_PER_HOUR` | `60` | per-user parse limit (`429 RATE_LIMITED`) |
+| `REGISTRATION_OPEN` | `true` | when `false`, self-registration returns `403 REGISTRATION_CLOSED` |
+| `PARSE_RATE_LIMIT_PER_IP_PER_HOUR` | `120` | parses per client address across all accounts (`429`, `details.scope=ip`) |
+| `PARSE_GLOBAL_LIMIT_PER_HOUR` | `300` | parses for the whole server, i.e. paid Claude calls (`429`, `details.scope=global`) |
+| `AUTH_RATE_LIMIT_PER_IP` | `30` | login + register attempts per client address per 15 min (`429`, `scope=ip`) |
+| `LOGIN_FAILURES_PER_USERNAME` | `10` | failed logins per username per 15 min before it is locked for the window (`scope=username`) |
+| `REGISTER_RATE_LIMIT_PER_IP_PER_HOUR` | `5` | accounts created per client address per hour (`scope=register_ip`) |
+| `PASSWORD_HASH_CONCURRENCY` | `4` | concurrent PBKDF2 checks; more waiting than 2 s get `503 AUTH_BUSY` |
 
 ---
 
@@ -162,12 +202,32 @@ curl -s http://127.0.0.1:8080/health
 curl -s http://127.0.0.1:8080/capabilities
 ```
 
-### 2. Query Available Neuron Groups
+### 2. Create an Account (session token)
+```bash
+TOKEN=$(curl -s -X POST http://127.0.0.1:8080/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"alice","password":"a-long-password"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/api/v1/me
+```
+Plan validation, `/health`, `/capabilities`, `/datasets`, `/groups` and `/neurons` are public;
+parsing, job submission and every `/api/v1/jobs/...` endpoint need the token (or the
+`flylab_session` cookie set by register/login).
+
+### 3. Natural-Language Planning (Claude)
+```bash
+curl -s -X POST http://127.0.0.1:8080/api/v1/plans/parse -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Compare sugar GRNs at 100 Hz with and without demo_silencing for 200 ms","report_language":"en"}'
+```
+Returns `status` (`ready` / `needs_input` / `unsupported`), the validated `plan` and
+`resolved_plan` (with `plan_id`), and `llm_metadata = {source, model, duration_ms, cost_usd}`.
+
+### 4. Query Available Neuron Groups
 ```bash
 curl -s http://127.0.0.1:8080/groups
 ```
 
-### 3. Validate Experiment Plan
+### 5. Validate Experiment Plan
 ```bash
 curl -s -X POST http://127.0.0.1:8080/api/v1/plans/validate \
   -H "Content-Type: application/json" \
@@ -210,29 +270,32 @@ Response:
 }
 ```
 
-### 4. Submit Job to Worker Queue
+### 6. Submit Job to Worker Queue
 ```bash
-curl -s -X POST http://127.0.0.1:8080/api/v1/jobs \
+curl -s -X POST http://127.0.0.1:8080/api/v1/jobs -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: experiment-run-001" \
-  -d '{"plan_id": "plan_9b38ead6"}'
+  -d '{"plan_id": "plan_9b38ead6", "title": "Sugar vs silencing", "prompt": "optional original request"}'
 ```
+Idempotency keys are scoped per user.
 
-### 5. Check Progress
+### 7. Check Progress and History
 ```bash
-curl -s http://127.0.0.1:8080/api/v1/jobs/{job_id}
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/api/v1/jobs/{job_id}
+# your jobs, newest first, with plan + summary (+ summary_error when summary.json is corrupt)
+curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8080/api/v1/jobs?limit=24&offset=0&status=succeeded"
 ```
 
-### 6. Retrieve Results & Download Export ZIP
+### 8. Retrieve Results & Download Export ZIP
 ```bash
 # Get summary rates and delta Hz
-curl -s http://127.0.0.1:8080/api/v1/jobs/{job_id}/results
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/api/v1/jobs/{job_id}/results
 
 # Get spike data as JSON or CSV
-curl -s "http://127.0.0.1:8080/api/v1/jobs/{job_id}/spikes?limit=50&format=json"
+curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8080/api/v1/jobs/{job_id}/spikes?limit=50&format=json"
 
 # Download complete self-contained reproducibility archive
-curl -s http://127.0.0.1:8080/api/v1/jobs/{job_id}/export -o experiment_export.zip
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/api/v1/jobs/{job_id}/export -o experiment_export.zip
 ```
 
 ---

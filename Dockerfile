@@ -7,7 +7,7 @@ COPY rust/flysim /build/rust/flysim
 RUN cd flysim && cargo build --release
 
 # Stage 2: Build Go flylab binary
-FROM golang:1.23-bookworm AS go-builder
+FROM golang:1.26-bookworm AS go-builder
 WORKDIR /build/go
 COPY go.mod go.sum ./
 RUN go mod download
@@ -45,8 +45,16 @@ ENV HOST=0.0.0.0 \
     CONTRACTS_DIR=/app/contracts \
     WEB_DIR=/app/web \
     FLYSIM_BIN=/app/bin/flysim \
-    OLLAMA_URL=http://ollama:11434 \
-    OLLAMA_MODEL=qwen3:8b
+    CLAUDE_BIN=claude \
+    CLAUDE_MODEL=claude-sonnet-5-5 \
+    CLAUDE_TIMEOUT_SECONDS=90 \
+    LLM_MAX_CONCURRENCY=2 \
+    PARSE_RATE_LIMIT_PER_HOUR=60 \
+    REGISTRATION_OPEN=true
+
+# The natural-language planner shells out to the Claude Code CLI (`claude -p`). The image does
+# not ship it: install it in a derived image or mount it and point CLAUDE_BIN at it. Without it
+# /plans/parse uses the keyword parser and every response carries a visible `llm_error`.
 
 EXPOSE 8080
 

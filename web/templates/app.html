@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FlyLab — Lab</title>
+  <meta name="theme-color" content="#050607">
+  <link rel="icon" href="/favicon.ico" type="image/svg+xml">
+  <link rel="icon" href="/static/img/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,100..900;1,62..125,100..900&family=Hanken+Grotesk:ital,wght@0,400..700;1,400&family=Martian+Mono:wdth,wght@75..112.5,100..800&display=swap">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body class="app">
+  <a class="skip" href="#view">Skip to content</a>
+
+  <!-- Boot / fatal state -->
+  <div class="boot" id="boot" role="status" aria-live="polite">
+    <div class="boot-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+    <p class="boot-text mono" id="boot-text">Connecting to the lab…</p>
+    <div class="boot-error" id="boot-error" hidden></div>
+  </div>
+
+  <!-- Auth gate -->
+  <section class="auth" id="auth" hidden aria-labelledby="auth-title">
+    <div class="auth-art" aria-hidden="true">
+      <img class="auth-plate" src="/static/img/hero-far-960.jpg" alt="" decoding="async">
+      <canvas class="auth-net" id="auth-net"></canvas>
+      <div class="auth-art-copy">
+        <p class="display auth-quote">127,400 neurons are waiting for instructions.</p>
+        <p class="mono auth-meta">FlyWire v630 / LIF after Shiu et al. 2024 / Rust engine</p>
+      </div>
+    </div>
+    <div class="auth-panel">
+      <a class="wordmark" href="/" aria-label="FlyLab home">
+        <svg viewBox="0 0 64 64" aria-hidden="true"><g stroke-linecap="round" stroke-width="6"><line x1="14" y1="12" x2="14" y2="30" stroke="#2EF29A"/><line x1="27" y1="24" x2="27" y2="52" stroke="#FF3FD2"/><line x1="40" y1="12" x2="40" y2="38" stroke="#2EF29A"/><line x1="53" y1="30" x2="53" y2="52" stroke="#8BEAF7"/></g></svg>
+        <span>FlyLab</span>
+      </a>
+      <div class="auth-box">
+        <h1 class="display auth-title" id="auth-title">Sign in to the lab</h1>
+        <p class="auth-sub" id="auth-sub">Your runs, plans and exports live in your account.</p>
+        <div class="seg auth-tabs" role="tablist" aria-label="Account">
+          <button type="button" role="tab" id="tab-login" aria-selected="true" aria-controls="auth-form">Sign in</button>
+          <button type="button" role="tab" id="tab-register" aria-selected="false" aria-controls="auth-form">Create account</button>
+        </div>
+        <div id="auth-notice"></div>
+        <form id="auth-form" class="auth-form" novalidate>
+          <label class="field">
+            <span class="field-label">Username</span>
+            <input id="auth-username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required minlength="3" maxlength="32" pattern="[a-z0-9_.\-]{3,32}" aria-describedby="hint-username">
+            <span class="field-hint" id="hint-username">3–32 characters: a–z, 0–9, dot, dash, underscore.</span>
+          </label>
+          <label class="field" id="field-display" hidden>
+            <span class="field-label">Display name <em>optional</em></span>
+            <input id="auth-display" name="display_name" autocomplete="name" maxlength="80">
+          </label>
+          <label class="field">
+            <span class="field-label">Password</span>
+            <input id="auth-password" name="password" type="password" autocomplete="current-password" required minlength="8" maxlength="128" aria-describedby="hint-password">
+            <span class="field-hint" id="hint-password">At least 8 characters.</span>
+          </label>
+          <div id="auth-error" role="alert"></div>
+          <button class="btn btn-primary auth-submit" type="submit" id="auth-submit">Sign in</button>
+        </form>
+        <a class="auth-back" href="/">← Back to the overview</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Application shell -->
+  <div class="shell" id="shell" hidden>
+    <header class="topbar">
+      <a class="wordmark" href="/" aria-label="FlyLab home">
+        <svg viewBox="0 0 64 64" aria-hidden="true"><g stroke-linecap="round" stroke-width="6"><line x1="14" y1="12" x2="14" y2="30" stroke="#2EF29A"/><line x1="27" y1="24" x2="27" y2="52" stroke="#FF3FD2"/><line x1="40" y1="12" x2="40" y2="38" stroke="#2EF29A"/><line x1="53" y1="30" x2="53" y2="52" stroke="#8BEAF7"/></g></svg>
+        <span>FlyLab</span>
+      </a>
+      <nav class="tabs" aria-label="Lab">
+        <a href="#/new" data-route="new">Create</a>
+        <a href="#/history" data-route="history">Library</a>
+      </nav>
+      <div class="topbar-end">
+        <span class="pill" id="status-pill" data-state="pending" role="status" aria-live="polite"><span class="dot"></span><span class="pill-text">Checking engine…</span></span>
+        <div class="menu">
+          <button class="avatar-btn" id="avatar-btn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu" aria-label="Account menu">
+            <span class="avatar" id="avatar-initial">·</span>
+          </button>
+          <div class="menu-pop" id="account-menu" role="menu" hidden>
+            <p class="menu-who"><b id="menu-name"></b><span class="mono" id="menu-user"></span></p>
+            <a role="menuitem" href="#/account">Account</a>
+            <a role="menuitem" href="#/history">Your runs</a>
+            <button role="menuitem" type="button" id="signout-btn">Sign out</button>
+          </div>
+        </div>
+      </div>
+    </header>
+    <div id="global-banner"></div>
+    <main id="view" class="view" tabindex="-1"></main>
+  </div>
+
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

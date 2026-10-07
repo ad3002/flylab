@@ -19,9 +19,18 @@ Let's Encrypt certificate. No Docker is involved in production.
 | `/etc/nginx/sites-available/flylab.aglabx.com` | copy of `deploy/nginx-flylab.aglabx.com.conf`, then extended by certbot |
 | `/usr/local/sbin/flylab-update` | root-owned copy of `deploy/update.sh` |
 
-The service listens on `127.0.0.1:8107`; nginx terminates TLS and proxies to it. The LLM parser
-uses the host's Ollama instance at `127.0.0.1:11434` with `qwen3:8b` (CPU inference, roughly
-90 s per parse on the current host; the heuristic parser is used when Ollama is unavailable).
+The service listens on `127.0.0.1:8107`; nginx terminates TLS and proxies to it. The
+natural-language planner runs the Claude Code CLI (`/usr/bin/claude -p`, about 3-5 s per parse)
+as user `flylab`, using that user's Claude login in `/mnt/beta/flylab/.claude`. If the binary is
+missing, `/plans/parse` falls back to a keyword parser and every response carries `llm_error`
+(visible in the UI); any other Claude failure is a `502 LLM_ERROR`. Tunables: `CLAUDE_BIN`,
+`CLAUDE_MODEL`, `CLAUDE_TIMEOUT_SECONDS`, `LLM_MAX_CONCURRENCY`, `PARSE_RATE_LIMIT_PER_HOUR`,
+`REGISTRATION_OPEN` (see `.env.example`). Abuse limits (per-IP/per-username login throttling,
+per-IP registration, per-IP and global parse budgets, password-hash concurrency) are listed in
+`README.md` and `docs/v2_contract.md` section 10; the client address is nginx's `X-Real-IP`.
+Open registration hands every visitor a parse quota on the operator's Claude login, so once the
+accounts you need exist, consider `REGISTRATION_OPEN=false`. Accounts can be created on the host with
+`su - flylab -c 'cd app && DB_PATH=/mnt/beta/flylab/db/flylab.db bin/flylab user create --username U --password P'`.
 
 ## Updating
 

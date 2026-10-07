@@ -1,210 +1,239 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>FlyLab | Drosophila Connectome LIF Simulator</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FlyLab — run the whole fly brain from a sentence</title>
+  <meta name="description" content="Describe an experiment in plain language. FlyLab turns it into a validated plan and simulates all 127,400 neurons and 14,687,178 synapses of the FlyWire Drosophila connectome.">
+  <meta name="theme-color" content="#050607">
+  <link rel="icon" href="/favicon.ico" type="image/svg+xml">
+  <link rel="icon" href="/static/img/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,100..900;1,62..125,100..900&family=Hanken+Grotesk:ital,wght@0,400..700;1,400&family=Martian+Mono:wdth,wght@75..112.5,100..800&display=swap">
+  <link rel="preload" as="image" href="/static/img/hero-far.jpg" media="(min-width: 761px)">
+  <link rel="preload" as="image" href="/static/img/hero-far-960.jpg" media="(max-width: 760px)">
   <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/landing.css">
 </head>
-<body>
-  <header>
-    <div class="logo-area">
-      <span class="logo-title">FlyLab</span>
-      <span class="badge">Nature 2024 LIF Model</span>
-      <span class="badge" id="llm-status-text">Checking LLM...</span>
-    </div>
-    <div style="font-size: 0.85rem; color: var(--text-secondary);">
-      Host: <strong style="color: var(--text-primary);">flylab.aglabx.com</strong>
+<body class="landing">
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="nav" id="nav">
+    <a class="wordmark" href="/" aria-label="FlyLab home">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><g stroke-linecap="round" stroke-width="6"><line x1="14" y1="12" x2="14" y2="30" stroke="#2EF29A"/><line x1="27" y1="24" x2="27" y2="52" stroke="#FF3FD2"/><line x1="40" y1="12" x2="40" y2="38" stroke="#2EF29A"/><line x1="53" y1="30" x2="53" y2="52" stroke="#8BEAF7"/></g></svg>
+      <span>FlyLab</span>
+    </a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#how">How it works</a>
+      <a href="#brain">The connectome</a>
+      <a href="#examples">Examples</a>
+      <a href="#science">Science</a>
+    </nav>
+    <div class="nav-end">
+      <span class="pill" id="status-pill" data-state="pending" role="status" aria-live="polite"><span class="dot"></span><span class="pill-text">Checking engine…</span></span>
+      <a class="btn btn-primary btn-sm" href="/app">Open the lab <span class="arrow" aria-hidden="true">→</span></a>
     </div>
   </header>
 
-  <div class="container">
-    <nav class="nav-tabs">
-      <button class="tab-btn active" data-target="create-view">1. Design Experiment</button>
-      <button class="tab-btn" id="tab-review-btn" data-target="review-view">2. Plan Review</button>
-      <button class="tab-btn" id="tab-exec-btn" data-target="execution-view">3. Live Execution</button>
-      <button class="tab-btn" id="tab-results-btn" data-target="results-view">4. Results & Comparison</button>
-      <button class="tab-btn" data-target="history-view">Job History</button>
+  <main id="main">
+    <!-- ============ HERO ============ -->
+    <section class="hero" id="hero" aria-labelledby="hero-title">
+      <div class="layers" aria-hidden="true">
+        <div class="layer layer-far" data-scroll="0.35" data-pointer="12">
+          <picture>
+            <source media="(max-width: 760px)" srcset="/static/img/hero-far-960.jpg">
+            <img src="/static/img/hero-far.jpg" alt="" width="1920" height="1080" fetchpriority="high" decoding="async">
+          </picture>
+        </div>
+        <canvas class="layer layer-net" id="net" data-scroll="0.22" data-pointer="26"></canvas>
+        <div class="layer layer-mid" data-scroll="0.12" data-pointer="44">
+          <img src="/static/img/hero-mid-520.png" alt="" width="520" height="520" decoding="async" data-optional>
+        </div>
+        <div class="layer layer-near" data-scroll="-0.18" data-pointer="80">
+          <img src="/static/img/hero-near-560.png" alt="" width="560" height="560" decoding="async" data-optional>
+        </div>
+        <div class="hero-shade"></div>
+      </div>
+
+      <div class="hero-copy">
+        <p class="eyebrow hero-eyebrow">Drosophila melanogaster &middot; FlyWire v630 &middot; LIF model after Shiu et&nbsp;al.&nbsp;2024</p>
+        <h1 class="display hero-title" id="hero-title">Run the whole fly&nbsp;brain from a&nbsp;<span class="tick-underline">sentence</span>.</h1>
+        <p class="lede">Say what to stimulate, what to silence and what to watch. FlyLab turns it into a checked experiment plan, simulates every neuron in the adult fly brain, and hands you the spikes.</p>
+
+        <form class="teaser" id="teaser" action="/app" method="get">
+          <label class="sr-only" for="teaser-input">Describe an experiment</label>
+          <span class="teaser-mark" aria-hidden="true">/</span>
+          <input id="teaser-input" name="p" type="text" autocomplete="off" maxlength="4000" placeholder="Activate sugar GRNs at 100 Hz and read out MN9">
+          <button class="btn btn-primary" type="submit">Open the lab <span class="arrow" aria-hidden="true">→</span></button>
+        </form>
+        <p class="hint mono"><span class="hint-dot" aria-hidden="true"></span><span class="hint-pointer">Move your cursor across the network — it stimulates the cells under it.</span><span class="hint-touch">The network on this page is firing live.</span></p>
+      </div>
+
+      <div class="hero-meta">
+        <p class="meta-line mono">FLYWIRE&nbsp;v630 <i>/</i> 127,400&nbsp;NEURONS <i>/</i> 14,687,178&nbsp;SYNAPSES <i>/</i> dt&nbsp;0.1&nbsp;ms</p>
+        <figure class="ribbon">
+          <canvas id="ribbon" aria-hidden="true"></canvas>
+          <figcaption class="mono">Live raster of the network above &mdash; green: sensory, cyan: interneurons, magenta: motor</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <!-- ============ STATEMENT ============ -->
+    <section class="statement" aria-label="What FlyLab simulates">
+      <p class="statement-text reveal">
+        <span class="num">127,400</span> neurons. <span class="num">14,687,178</span> synapses.
+        <span class="num">100&nbsp;ms</span> of whole-brain activity in about <span class="num">1&nbsp;s</span> of compute &mdash;
+        and every spike matches the Brian2 reference run, <em>bit for bit</em>.
+      </p>
+    </section>
+
+    <!-- ============ HOW IT WORKS ============ -->
+    <section class="how" id="how" aria-labelledby="how-title">
+      <div class="how-texture" aria-hidden="true"><img src="/static/img/spike-texture.jpg" alt="" loading="lazy" decoding="async" data-optional></div>
+      <div class="how-grid">
+        <div class="how-head">
+          <p class="eyebrow">How it works</p>
+          <h2 class="display h2" id="how-title">From a sentence to spikes, in four&nbsp;steps.</h2>
+          <p class="muted-p">Each step leaves something you can inspect: the words you wrote, the plan that was checked, the run that happened, the files you keep.</p>
+          <a class="btn" href="/app">Try it <span class="arrow" aria-hidden="true">→</span></a>
+        </div>
+        <ol class="steps">
+          <li class="step reveal">
+            <p class="step-n mono">1 / 4</p>
+            <h3>Describe the experiment</h3>
+            <p>Write what to stimulate, what to silence and which neurons to watch — in English or Russian. No config files, no code.</p>
+            <figure class="artifact artifact-quote">
+              <blockquote>“Activate sugar GRNs at 100&nbsp;Hz, silence the top sugar neuron, and compare MN9.”</blockquote>
+            </figure>
+          </li>
+          <li class="step reveal">
+            <p class="step-n mono">2 / 4</p>
+            <h3>Claude writes a validated plan</h3>
+            <p>Claude maps your words onto named neuron groups. A schema validator checks every limit before anything runs; when something is ambiguous, you are asked instead of guessed for.</p>
+            <figure class="artifact"><pre class="mono"><span class="k">experiment</span>  compare_silencing
+<span class="k">stimulate</span>   sugar_grn <i>·</i> 21 neurons <i>·</i> <b class="g">100 Hz</b>
+<span class="k">silence</span>     demo_silencing <i>·</i> 1 neuron
+<span class="k">read out</span>    mn9 <i>·</i> 2 neurons
+<span class="k">duration</span>    1000 ms <i>×</i> 1 <i>·</i> seed 42</pre></figure>
+          </li>
+          <li class="step reveal">
+            <p class="step-n mono">3 / 4</p>
+            <h3>The whole connectome runs</h3>
+            <p>A Rust leaky integrate-and-fire engine steps all 127,400 neurons through 14.7 million synapses at 0.1&nbsp;ms resolution — the published model’s equations and constants, nothing simplified away.</p>
+            <figure class="artifact"><pre class="mono"><span class="k">load</span>   flywire_630_csr.bin
+       127,400 cells <i>·</i> 14,687,178 synapses
+<span class="k">model</span>  τm 20 ms <i>·</i> τs 5 ms <i>·</i> Vth −45 mV
+<span class="k">run</span>    condition A <i>·</i> 10,000 steps  <b class="g">done</b>
+<span class="k">run</span>    condition B <i>·</i> 10,000 steps  <b class="g">done</b></pre></figure>
+          </li>
+          <li class="step reveal">
+            <p class="step-n mono">4 / 4</p>
+            <h3>Compare, then take it with you</h3>
+            <p>Read the readout rates side by side with the change in Hz, scan the raster, and download a ZIP with the plan, the input events, every spike and a script that replays the run offline.</p>
+            <figure class="artifact"><pre class="mono"><span class="k">MN9 · L</span>   A 42.0 Hz   B 31.0 Hz   <b class="m">Δ −11.0</b>
+<span class="k">MN9 · R</span>   A 39.0 Hz   B 30.0 Hz   <b class="m">Δ −9.0</b>
+<span class="k">export</span>    resolved_plan.json  spikes.parquet
+          input_events.parquet  replay.sh</pre>
+            <figcaption class="mono">Example output</figcaption></figure>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <!-- ============ BRAIN ============ -->
+    <section class="brain" id="brain" aria-labelledby="brain-title">
+      <div class="brain-stage">
+        <div class="brain-img" id="brain-img">
+          <picture>
+            <source media="(max-width: 760px)" srcset="/static/img/fly-brain-900.jpg">
+            <img src="/static/img/fly-brain.jpg" alt="Illustrated render of the adult Drosophila brain: two optic lobes flanking the central brain" width="1600" height="1200" loading="lazy" decoding="async">
+          </picture>
+          <div class="brain-notes" id="brain-notes" aria-hidden="true">
+          <span class="note note-ol" style="--x:9%; --y:50%"><i></i><b>Optic lobe</b></span>
+          <span class="note note-mb" style="--x:31%; --y:25%"><i></i><b>Mushroom body</b></span>
+          <span class="note note-cx" style="--x:50%; --y:40%"><i></i><b>Central complex</b></span>
+          <span class="note note-sez" style="--x:50%; --y:83%"><i></i><b>Subesophageal zone<span class="note-long">&nbsp;— taste in, MN9 out</span></b></span>
+          </div>
+        </div>
+      </div>
+      <div class="brain-copy">
+        <div class="brain-copy-head">
+          <p class="eyebrow">The connectome</p>
+          <h2 class="display h2" id="brain-title">Not a toy network. The fly’s actual wiring.</h2>
+        </div>
+        <div class="brain-copy-body">
+        <p>Every connection in the simulation is a synapse reconstructed by FlyWire from electron microscopy of an adult female <em>Drosophila</em> brain: 127,400 proofread neurons, 14,687,178 synapses, each with its own sign and weight.</p>
+        <p>Stimulate the labellar sugar receptors and the signal has to find its own way through that wiring to MN9, the motor neuron that extends the proboscis. Nothing is shortcut.</p>
+        <p class="caption mono">Image: illustrative render. Simulations use the full v630 reconstruction.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ EXAMPLES ============ -->
+    <section class="examples" id="examples" aria-labelledby="examples-title">
+      <div class="examples-head">
+        <div>
+          <p class="eyebrow">Examples</p>
+          <h2 class="display h2" id="examples-title">Start from an example.</h2>
+        </div>
+        <p class="muted-p">Each thumbnail is the fingerprint of a run — magenta for the baseline condition, green for the silenced one, cyan for the stimulus train. Pick one to start from it.</p>
+      </div>
+      <div class="strip" id="strip" role="group" aria-label="Example experiments"></div>
+    </section>
+
+    <!-- ============ SCIENCE ============ -->
+    <section class="science" id="science" aria-labelledby="science-title">
+      <div class="science-head">
+        <p class="eyebrow">Science</p>
+        <h2 class="display h2" id="science-title">Built on published work, and checked against it.</h2>
+      </div>
+      <ol class="refs">
+        <li class="ref reveal">
+          <p class="ref-tag mono">Model</p>
+          <p class="ref-cite">Shiu P.K., Sterne G.R., et al. <cite>A Drosophila computational brain model reveals sensorimotor processing.</cite> <span class="ref-src">Nature 634 (2024)</span></p>
+          <p class="ref-note">The leaky integrate-and-fire model FlyLab implements: same equations, same constants (τm 20&nbsp;ms, τs 5&nbsp;ms, threshold −45&nbsp;mV, 1.8&nbsp;ms delay), pinned to upstream commit <span class="mono">91bdd1e</span>.</p>
+        </li>
+        <li class="ref reveal">
+          <p class="ref-tag mono">Connectome</p>
+          <p class="ref-cite">FlyWire Consortium — Dorkenwald S. et al., <cite>Neuronal wiring diagram of an adult brain;</cite> Schlegel P. et al., <cite>Whole-brain annotation and multi-connectome cell typing.</cite> <span class="ref-src">Nature 634 (2024)</span></p>
+          <p class="ref-note">Materialization 630 (23 March 2023): completeness and connectivity tables, verified by SHA-256 before every run.</p>
+        </li>
+        <li class="ref reveal">
+          <p class="ref-tag mono">Audit</p>
+          <p class="ref-cite">Upstream audit of silencing semantics. <span class="ref-src"><a href="https://github.com/philshiu/Drosophila_brain_model" rel="noopener">philshiu/Drosophila_brain_model</a></span></p>
+          <p class="ref-note">The upstream README says silencing cuts connections to and from a neuron; the executed code zeroes only its <em>outgoing</em> synapses. FlyLab follows what the code does, and says so in every plan.</p>
+        </li>
+        <li class="ref reveal">
+          <p class="ref-tag mono">Reference</p>
+          <p class="ref-cite">Stimberg M., Brette R., Goodman D.F.M. <cite>Brian 2, an intuitive and efficient neural simulator.</cite> <span class="ref-src">eLife 8 (2019)</span></p>
+          <p class="ref-note">The Rust engine is checked spike for spike against a Brian2 reference run of the same plan, seed and stimulus.</p>
+        </li>
+      </ol>
+    </section>
+
+    <!-- ============ CTA ============ -->
+    <section class="cta" aria-labelledby="cta-title">
+      <div class="cta-bg" aria-hidden="true"><img src="/static/img/spike-texture.jpg" alt="" loading="lazy" decoding="async" data-optional></div>
+      <h2 class="display cta-title" id="cta-title">Ask the fly brain something.</h2>
+      <a class="btn btn-primary cta-btn" href="/app">Open the lab <span class="arrow" aria-hidden="true">→</span></a>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <a class="wordmark" href="/" aria-label="FlyLab home">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><g stroke-linecap="round" stroke-width="6"><line x1="14" y1="12" x2="14" y2="30" stroke="#2EF29A"/><line x1="27" y1="24" x2="27" y2="52" stroke="#FF3FD2"/><line x1="40" y1="12" x2="40" y2="38" stroke="#2EF29A"/><line x1="53" y1="30" x2="53" y2="52" stroke="#8BEAF7"/></g></svg>
+      <span>FlyLab</span>
+    </a>
+    <p class="footer-note">Whole-brain spiking simulation of <em>Drosophila melanogaster</em> on the FlyWire v630 connectome. A research tool — not a model of behaviour.</p>
+    <nav class="footer-links" aria-label="Footer">
+      <a href="/app">Open the lab</a>
+      <a href="/app#/history">Your runs</a>
+      <a href="/capabilities">Engine status (JSON)</a>
+      <a href="https://flywire.ai" rel="noopener">FlyWire</a>
     </nav>
+  </footer>
 
-    <!-- 1. CREATE VIEW -->
-    <div id="create-view" class="view-pane">
-      <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
-        <button id="mode-prompt-btn" class="btn btn-secondary active">Natural Language (LLM)</button>
-        <button id="mode-form-btn" class="btn btn-secondary">Manual Parameters</button>
-      </div>
-
-      <!-- Natural Language Prompt Section -->
-      <div id="prompt-section" class="card">
-        <div class="card-title">Describe Experiment in English or Russian</div>
-        <div class="form-group">
-          <label>Prompt</label>
-          <textarea id="prompt-input" class="form-control" placeholder="e.g. Stimulate sugar_grn at 50 Hz for 100 ms and measure MN9 activity"></textarea>
-          <div class="sample-prompts">
-            <span class="prompt-chip" data-prompt="Stimulate sugar_grn at 50 Hz for 100 ms and readout mn9">Single: Sugar GRN 50 Hz</span>
-            <span class="prompt-chip" data-prompt="Compare sugar_grn 50 Hz stimulation with and without demo_silencing, 100 ms duration, readout mn9">Compare: Sugar GRN vs Silencing</span>
-            <span class="prompt-chip" data-prompt="Stimulate sugar_grn at 100 Hz for 200 ms and measure mn9">Single: Sugar GRN 100 Hz 200 ms</span>
-          </div>
-        </div>
-        <button id="parse-btn" class="btn btn-primary" onclick="parsePrompt()">Translate to Plan</button>
-      </div>
-
-      <!-- Manual Parameters Section -->
-      <div id="form-section" class="card" style="display: none;">
-        <div class="card-title">Computational Parameters</div>
-        <div class="grid-2">
-          <div class="form-group">
-            <label>Experiment Type</label>
-            <select id="exp-type" class="form-control">
-              <option value="single">Single Condition (Stimulation)</option>
-              <option value="compare_silencing" selected>Comparison (Stimulation vs Silencing)</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Input Group (Stimulation)</label>
-            <select id="act-group" class="form-control">
-              <option value="sugar_grn" selected>sugar_grn (21 Sugar GRNs)</option>
-              <option value="bitter_grn">bitter_grn (21 Bitter GRNs)</option>
-              <option value="ir94e">ir94e (18 Receptor Neurons)</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Stimulation Frequency (Rate Hz)</label>
-            <input type="number" id="rate-hz" class="form-control" value="50" min="0" max="200" step="5">
-          </div>
-          <div class="form-group">
-            <label>Silencing Group (Condition B)</label>
-            <select id="slnc-group" class="form-control">
-              <option value="demo_silencing" selected>demo_silencing (Sugar GRN #12)</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Readout Motor Neurons</label>
-            <select id="ro-group" class="form-control">
-              <option value="mn9" selected>mn9 (Proboscis Extension Motor Neurons)</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Duration (ms)</label>
-            <input type="number" id="duration-ms" class="form-control" value="100" min="10" max="1000" step="10">
-          </div>
-          <div class="form-group">
-            <label>Repeats (Trials)</label>
-            <input type="number" id="repeats" class="form-control" value="1" min="1" max="3">
-          </div>
-          <div class="form-group">
-            <label>Base Seed</label>
-            <input type="number" id="base-seed" class="form-control" value="42">
-          </div>
-        </div>
-        <button class="btn btn-primary" onclick="validateFormPlan()">Validate Plan</button>
-      </div>
-    </div>
-
-    <!-- 2. PLAN REVIEW VIEW -->
-    <div id="review-view" class="view-pane" style="display: none;">
-      <div class="card">
-        <div class="card-title">Experiment Plan Review</div>
-        <div class="grid-2" style="margin-bottom: 1.5rem;">
-          <div>
-            <p><strong>Plan ID:</strong> <span id="review-plan-id" class="font-mono"></span></p>
-            <p><strong>Operation:</strong> <span id="review-exp-type"></span></p>
-            <p><strong>Duration:</strong> <span id="review-duration"></span></p>
-            <p><strong>Repeats:</strong> <span id="review-repeats"></span></p>
-          </div>
-          <div>
-            <p><strong>Stimulus:</strong> <span id="review-activation-count"></span></p>
-            <p><strong>Silenced:</strong> <span id="review-silencing-count"></span></p>
-            <p><strong>Readout:</strong> <span id="review-readout-count"></span></p>
-            <p><strong>Base Seed:</strong> <span id="review-seed"></span></p>
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label>Canonical Plan JSON</label>
-          <pre id="plan-json-preview" style="background: var(--bg-tertiary); padding: 1rem; border-radius: 6px; font-family: var(--mono); font-size: 0.8rem; overflow-x: auto; max-height: 250px;"></pre>
-        </div>
-
-        <button id="launch-btn" class="btn btn-success" onclick="launchExperiment()">Launch Simulation (Rust Core)</button>
-      </div>
-    </div>
-
-    <!-- 3. LIVE EXECUTION VIEW -->
-    <div id="execution-view" class="view-pane" style="display: none;">
-      <div class="card">
-        <div class="card-title">Simulation Progress</div>
-        <p><strong>Job ID:</strong> <span id="exec-job-id" class="font-mono"></span></p>
-        <p style="margin-top: 0.5rem;">
-          <strong>Status:</strong> <span id="exec-status-badge" class="status-tag status-queued">QUEUED</span>
-          <span id="exec-stage-text" style="margin-left: 1rem; color: var(--text-secondary);">Stage: loading</span>
-        </p>
-
-        <div class="progress-bar-container">
-          <div id="exec-progress-fill" class="progress-bar-fill" style="width: 0%;"></div>
-        </div>
-
-        <div style="margin-top: 1.5rem;">
-          <button class="btn btn-danger" onclick="cancelCurrentJob()">Cancel Job</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- 4. RESULTS VIEW -->
-    <div id="results-view" class="view-pane" style="display: none;">
-      <div class="card">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-          <div class="card-title" style="margin: 0;">Readout Activity & Silencing Impact</div>
-          <button id="results-export-btn" class="btn btn-primary">Download Export ZIP</button>
-        </div>
-
-        <table style="margin-bottom: 1.5rem;">
-          <thead>
-            <tr>
-              <th>Neuron ID</th>
-              <th>Condition A (Baseline)</th>
-              <th>Condition B (Silencing)</th>
-              <th>Delta (Δ Hz)</th>
-            </tr>
-          </thead>
-          <tbody id="results-table-body"></tbody>
-        </table>
-
-        <div class="grid-2" style="margin-bottom: 1.5rem;">
-          <div>
-            <p><strong>Condition A Spikes:</strong> <span id="summary-spikes-a">0</span></p>
-            <p><strong>Condition A Active Neurons:</strong> <span id="summary-active-a">0</span></p>
-          </div>
-          <div>
-            <p><strong>Condition B Spikes:</strong> <span id="summary-spikes-b">N/A</span></p>
-            <p><strong>Condition B Active Neurons:</strong> <span id="summary-active-b">N/A</span></p>
-          </div>
-        </div>
-
-        <div class="card-title">Activity Raster</div>
-        <canvas id="raster-canvas" width="800" height="280" style="width: 100%; max-width: 800px; background: var(--bg-tertiary); border-radius: 6px;"></canvas>
-      </div>
-    </div>
-
-    <!-- 5. HISTORY VIEW -->
-    <div id="history-view" class="view-pane" style="display: none;">
-      <div class="card">
-        <div class="card-title">Experiment Run History</div>
-        <table>
-          <thead>
-            <tr>
-              <th>Job ID</th>
-              <th>Plan ID</th>
-              <th>Status</th>
-              <th>Time</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody id="history-table-body"></tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
-  <script src="/static/js/app.js"></script>
+  <script type="module" src="/static/js/landing.js"></script>
 </body>
 </html>
