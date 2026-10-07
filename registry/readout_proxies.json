@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "note": "A behavioural proxy is a fact about the published literature: which behaviour the cited work links to a readout neuron's activity, and how that link was validated. It is never a statement about a particular run; whether a run's activity would change an animal's behaviour is always a hypothesis. Only proxies that Shiu et al. 2024 (the model this platform reimplements) states and tests are listed.",
+  "proxies": [
+    {
+      "proxy_id": "mn9_rostrum_extension",
+      "group_id": "mn9",
+      "neuron_ids": [
+        "720575940645521262",
+        "720575940660219265"
+      ],
+      "behaviour_en": "proboscis extension (rostrum lifting) - the motor output of feeding initiation",
+      "behaviour_ru": "выдвижение хоботка (подъём рострума) - моторный выход инициации питания",
+      "evidence": "Shiu et al. 2024 used MN9, the motor neuron that controls rostrum lifting during proboscis extension (Gordon & Scott 2009; McKellar et al. 2020), as the model readout of feeding initiation, assuming that higher MN9 firing means a higher probability of rostrum lifting; the paper states that the exact relation between MN9 firing rate and rostrum lifting is not known. In their optogenetic screen of 106 cell types activated at 50 Hz in the model, 11 were predicted to make MN9 fire (rate above 0 Hz) and 10 of those 11 elicited rostrum extension in flies; of the 95 predicted not to, 4 did. That is 101 of the 106 predictions correct (95.3%), which the paper summarises as greater than 90% accuracy (Fig. 2a-c, Supplementary Table 3). The model's prediction that bitter and Ir94e gustatory neuron activity suppresses sugar-evoked MN9 firing (Fig. 3b) was confirmed behaviourally: optogenetic activation of either reduced proboscis extension to 50 mM sucrose (Fig. 3d,e). In the model (not measured in flies), unilateral sugar GRN activation drives the contralateral MN9 more strongly than the ipsilateral MN9, for GRNs of either hemisphere (Fig. 1c, Extended Data Fig. 1d).",
+      "limits": "Model MN9 spiking is a proxy for a motor command, not the behaviour: there are no muscles, body or sensory feedback in the model, and the firing-rate-to-behaviour relation was not calibrated. Behavioural validation covers the specific manipulations tested in the paper only.",
+      "reference": "Shiu et al., Nature 2024. doi:10.1038/s41586-024-07763-9",
+      "secondary_references": [
+        "Gordon & Scott, Neuron 2009. doi:10.1016/j.neuron.2008.12.033",
+        "McKellar et al., eLife 2020. doi:10.7554/eLife.54978"
+      ]
+    }
+  ]
+}

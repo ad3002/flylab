@@ -109,6 +109,18 @@ func (s *Store) initSchema() error {
 		PRIMARY KEY (user_id, key)
 	);
 
+	-- v3: the latest AI interpretation of a job (one row per job, replaced on regenerate).
+	CREATE TABLE IF NOT EXISTS interpretations (
+		job_id TEXT PRIMARY KEY,
+		language TEXT,
+		model TEXT,
+		created_at TIMESTAMP,
+		cost_usd REAL,
+		duration_ms INTEGER,
+		digest_json TEXT,
+		result_json TEXT
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 	CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
 	CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);

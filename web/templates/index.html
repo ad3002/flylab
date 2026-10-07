@@ -13,8 +13,8 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,100..900;1,62..125,100..900&family=Hanken+Grotesk:ital,wght@0,400..700;1,400&family=Martian+Mono:wdth,wght@75..112.5,100..800&display=swap">
   <link rel="preload" as="image" href="/static/img/hero-far.jpg" media="(min-width: 761px)">
   <link rel="preload" as="image" href="/static/img/hero-far-960.jpg" media="(max-width: 760px)">
-  <link rel="stylesheet" href="/static/css/style.css?v=motion2">
-  <link rel="stylesheet" href="/static/css/landing.css?v=motion2">
+  <link rel="stylesheet" href="/static/css/style.css?v=v3en">
+  <link rel="stylesheet" href="/static/css/landing.css?v=v3en">
   <!-- Motion flags before first paint: .mo = motion allowed, .intro = play the hero entrance.
        Scroll-reveal "before" states additionally need html.reveal-armed, which only landing.js sets
        once its observer exists: if the module fails, nothing stays hidden. -->
@@ -98,13 +98,13 @@
       <div class="how-grid">
         <div class="how-head">
           <p class="eyebrow reveal">How it works</p>
-          <h2 class="display h2" id="how-title">From a sentence to spikes, in four&nbsp;steps.</h2>
-          <p class="muted-p reveal">Each step leaves something you can inspect: the words you wrote, the plan that was checked, the run that happened, the files you keep.</p>
+          <h2 class="display h2" id="how-title">From a sentence to spikes, in five&nbsp;steps.</h2>
+          <p class="muted-p reveal">Each step leaves something you can inspect: the words you wrote, the plan that was checked, the run that happened, the files you keep — and, if you ask, Claude’s hypotheses next to the numbers they came from.</p>
           <a class="btn reveal" href="/app">Try it <span class="arrow" aria-hidden="true">→</span></a>
         </div>
         <ol class="steps">
           <li class="step reveal">
-            <p class="step-n mono">1 / 4</p>
+            <p class="step-n mono">1 / 5</p>
             <h3>Describe the experiment</h3>
             <p>Write what to stimulate, what to silence and which neurons to watch — in English or Russian. No config files, no code.</p>
             <figure class="artifact artifact-quote">
@@ -112,7 +112,7 @@
             </figure>
           </li>
           <li class="step reveal">
-            <p class="step-n mono">2 / 4</p>
+            <p class="step-n mono">2 / 5</p>
             <h3>Claude writes a validated plan</h3>
             <p>Claude maps your words onto named neuron groups. A schema validator checks every limit before anything runs; when something is ambiguous, you are asked instead of guessed for.</p>
             <figure class="artifact"><pre class="mono"><span class="k">experiment</span>  compare_silencing
@@ -122,7 +122,7 @@
 <span class="k">duration</span>    1000 ms <i>×</i> 1 <i>·</i> seed 42</pre></figure>
           </li>
           <li class="step reveal">
-            <p class="step-n mono">3 / 4</p>
+            <p class="step-n mono">3 / 5</p>
             <h3>The whole connectome runs</h3>
             <p>A Rust leaky integrate-and-fire engine steps all 127,400 neurons through 14.7 million synapses at 0.1&nbsp;ms resolution — the published model’s equations and constants, nothing simplified away.</p>
             <figure class="artifact"><pre class="mono"><span class="k">load</span>   flywire_630_csr.bin
@@ -132,7 +132,7 @@
 <span class="k">run</span>    condition B <i>·</i> 10,000 steps  <b class="g">done</b></pre></figure>
           </li>
           <li class="step reveal">
-            <p class="step-n mono">4 / 4</p>
+            <p class="step-n mono">4 / 5</p>
             <h3>Compare, then take it with you</h3>
             <p>Read the readout rates side by side with the change in Hz, scan the raster, and download a ZIP with the plan, the input events, every spike and a script that replays the run offline.</p>
             <figure class="artifact"><pre class="mono"><span class="k">MN9 · L</span>   A 42.0 Hz   B 31.0 Hz   <b class="m">Δ −11.0</b>
@@ -140,6 +140,20 @@
 <span class="k">export</span>    resolved_plan.json  spikes.parquet
           input_events.parquet  replay.sh</pre>
             <figcaption class="mono">Example output</figcaption></figure>
+          </li>
+          <li class="step step-ai reveal">
+            <p class="step-n mono">5 / 5</p>
+            <h3>Ask what it might mean</h3>
+            <p>Claude reads a digest of the run — the numbers FlyLab computed, FlyWire cell annotations and the model’s limits — and proposes hypotheses. Each one cites the numbers it rests on, states its confidence and comes with a follow-up experiment you can run in one click. You can always see exactly what Claude was given.</p>
+            <figure class="artifact artifact-hyp">
+              <p class="hyp-stamp"><b>AI-generated assumptions for expert review.</b> AI-generated hypotheses about a computational model. They are not established biological findings and must be evaluated by an expert.</p>
+              <pre class="mono"><span class="c">H1</span>  <span class="t">MN9 activity may be relayed through gustatory interneurons</span>
+    <span class="k">confidence</span>  <b class="c">▮▮</b><i>▮</i> medium <i>·</i> few neurons on the path are annotated
+    <span class="k">evidence</span>    readout Δ rate <i>·</i> hops from stimulated <i>·</i> cell_class
+    <span class="k">caveat</span>      no neuromodulation, no body feedback in this model
+    <span class="k">test</span>        silence the candidate relay, read out MN9  <b class="c">run →</b></pre>
+              <figcaption class="mono">Illustrative layout — not a result</figcaption>
+            </figure>
           </li>
         </ol>
       </div>
@@ -247,6 +261,6 @@
     </nav>
   </footer>
 
-  <script type="module" src="/static/js/landing.js?v=motion2"></script>
+  <script type="module" src="/static/js/landing.js?v=v3en"></script>
 </body>
 </html>

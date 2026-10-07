@@ -1,5 +1,5 @@
-import { SpikingNet, drawRasterThumb } from "/static/js/neural.js?v=motion2";
-import { isReduced, onReducedChange, finePointer, isLite, countUp, splitLines, assignLines, magnetic } from "/static/js/motion.js?v=motion2";
+import { SpikingNet, drawRasterThumb } from "/static/js/neural.js?v=v3en";
+import { isReduced, onReducedChange, finePointer, isLite, countUp, splitLines, assignLines, magnetic } from "/static/js/motion.js?v=v3en";
 
 document.documentElement.classList.add("js");
 const root = document.documentElement;
@@ -8,11 +8,11 @@ const root = document.documentElement;
 const EXAMPLES = [
   { p: "Activate sugar GRNs at 100 Hz and read out MN9", type: "single", hz: 100, ms: 1000, a: 2400, b: null },
   { p: "Compare bitter GRN activation at 150 Hz with and without silencing the top sugar neuron", type: "compare", hz: 150, ms: 500, a: 1800, b: 1650 },
-  { p: "Стимулируй сахарные рецепторы на 50 Гц, замолчи один нейрон и сравни MN9", type: "compare", hz: 50, ms: 1000, a: 900, b: 870 },
+  { p: "Sugar GRNs at 50 Hz, silence one sugar neuron and compare MN9", type: "compare", hz: 50, ms: 1000, a: 900, b: 870 },
   { p: "Ir94e neurons at 80 Hz for 500 ms, three repeats", type: "single", hz: 80, ms: 500, a: 640, b: null },
   { p: "Sugar GRNs at 20 Hz — does MN9 respond at all?", type: "single", hz: 20, ms: 1000, a: 120, b: null },
   { p: "Bitter GRNs at 200 Hz for 250 ms, seed 7", type: "single", hz: 200, ms: 250, a: 3100, b: null },
-  { p: "Сахарные GRN 200 Гц, 1000 мс, три повтора, читать MN9", type: "single", hz: 200, ms: 1000, a: 5200, b: null },
+  { p: "Sugar GRNs at 200 Hz for 1000 ms, three repeats, read out MN9", type: "single", hz: 200, ms: 1000, a: 5200, b: null },
   { p: "Sugar and Ir94e together at 60 Hz; silence the demo neuron in condition B", type: "compare", hz: 60, ms: 800, a: 1500, b: 1320 },
 ];
 const strip = document.getElementById("strip");
@@ -174,7 +174,7 @@ const teaserInput = document.getElementById("teaser-input");
 const examplesForTeaser = [
   "Activate sugar GRNs at 100 Hz and read out MN9",
   "Compare bitter GRN activation with and without silencing the top sugar neuron",
-  "Стимулируй сахарные рецепторы на 50 Гц и посмотри на MN9",
+  "Sugar GRNs at 50 Hz — how strongly does MN9 fire?",
   "Ir94e neurons at 80 Hz for 500 ms, three repeats",
 ];
 teaser.addEventListener("submit", (e) => {

@@ -132,6 +132,11 @@ type HistoryJob struct {
 	PlanError    *string         `json:"plan_error"`
 	Summary      *JobSummary     `json:"summary"`
 	SummaryError *string         `json:"summary_error"`
+	// HasInterpretation: an AI interpretation is stored for this job (contract v3).
+	HasInterpretation bool `json:"has_interpretation"`
+	// InterpretationLanguage is the stored interpretation's language (null without one), so
+	// the UI labels a run in the language its hypotheses are written in.
+	InterpretationLanguage *string `json:"interpretation_language"`
 }
 
 type NeuronGroup struct {

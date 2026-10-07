@@ -42,3 +42,7 @@ Thumbs.db
 
 # Smoke / eval scratch runs
 .smoke/
+
+# Neuron annotations (downloaded and derived by scripts/setup_data.sh)
+data/*.tsv
+data/*.tsv.part

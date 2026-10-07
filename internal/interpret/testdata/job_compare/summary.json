@@ -1,0 +1,8 @@
+{
+  "experiment_type": "compare_silencing",
+  "active_neurons_count_A": 5,
+  "active_neurons_count_B": 4,
+  "total_spikes_A": 50,
+  "total_spikes_B": 44,
+  "readout_summary": []
+}

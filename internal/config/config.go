@@ -33,6 +33,14 @@ type Config struct {
 	ParseRateLimitPerIPPerHour int
 	ParseGlobalLimitPerHour    int
 
+	// Interpretation (v3: spikes -> AI hypotheses) through the same claude CLI. The rate limits
+	// are separate counters from the planner's; the concurrency slots are shared.
+	ClaudeInterpretModel           string
+	ClaudeInterpretTimeoutSeconds  int
+	InterpretRateLimitPerHour      int
+	InterpretRateLimitPerIPPerHour int
+	InterpretGlobalLimitPerHour    int
+
 	// Accounts.
 	RegistrationOpen bool
 	// AuthRateLimitPerIP: login + register attempts per client address per 15 minutes.
@@ -105,6 +113,12 @@ func LoadConfig() (*Config, error) {
 
 		ParseRateLimitPerIPPerHour: intVar("PARSE_RATE_LIMIT_PER_IP_PER_HOUR", 120, 1),
 		ParseGlobalLimitPerHour:    intVar("PARSE_GLOBAL_LIMIT_PER_HOUR", 300, 1),
+
+		ClaudeInterpretModel:           getEnv("CLAUDE_INTERPRET_MODEL", "claude-opus-5-5"),
+		ClaudeInterpretTimeoutSeconds:  intVar("CLAUDE_INTERPRET_TIMEOUT_SECONDS", 180, 1),
+		InterpretRateLimitPerHour:      intVar("INTERPRET_RATE_LIMIT_PER_HOUR", 20, 1),
+		InterpretRateLimitPerIPPerHour: intVar("INTERPRET_RATE_LIMIT_PER_IP_PER_HOUR", 40, 1),
+		InterpretGlobalLimitPerHour:    intVar("INTERPRET_GLOBAL_LIMIT_PER_HOUR", 100, 1),
 
 		RegistrationOpen:              boolVar("REGISTRATION_OPEN", true),
 		AuthRateLimitPerIP:            intVar("AUTH_RATE_LIMIT_PER_IP", 30, 1),

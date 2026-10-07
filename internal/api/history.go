@@ -13,6 +13,32 @@ import (
 	"github.com/ad3002/flylab/internal/storage"
 )
 
+// buildHistoryJobs builds the HistoryJob of every job, with has_interpretation from one
+// query. A failing query is an error (the caller answers 500), never has_interpretation=false.
+func (s *Server) buildHistoryJobs(jobs []*domain.Job) ([]*domain.HistoryJob, error) {
+	ids := make([]string, len(jobs))
+	for i, j := range jobs {
+		ids[i] = j.JobID
+	}
+	interpreted, err := s.store.InterpretedJobs(ids)
+	if err != nil {
+		return nil, fmt.Errorf("cannot check which jobs have interpretations: %w", err)
+	}
+	out := make([]*domain.HistoryJob, 0, len(jobs))
+	for _, j := range jobs {
+		h := s.buildHistoryJob(j)
+		if lang, ok := interpreted[j.JobID]; ok {
+			h.HasInterpretation = true
+			if lang != "" {
+				l := lang
+				h.InterpretationLanguage = &l
+			}
+		}
+		out = append(out, h)
+	}
+	return out, nil
+}
+
 // buildHistoryJob attaches the stored plan and, for succeeded jobs, the compact summary.
 // When a source exists but cannot be read or parsed the error goes into plan_error /
 // summary_error so the UI shows it; nothing is silently dropped.

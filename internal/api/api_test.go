@@ -10,12 +10,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ad3002/flylab/internal/api"
 	"github.com/ad3002/flylab/internal/config"
 	"github.com/ad3002/flylab/internal/contracts"
 	"github.com/ad3002/flylab/internal/domain"
+	"github.com/ad3002/flylab/internal/interpret"
 	"github.com/ad3002/flylab/internal/llm"
 	"github.com/ad3002/flylab/internal/storage"
 )
@@ -26,8 +28,10 @@ type testEnv struct {
 	store   *storage.Store
 	cfg     *config.Config
 	server  *api.Server
+	interp  *interpret.Service
 	// bodies collects every response body so tests can assert that secrets never leak.
-	bodies []string
+	bodies   []string
+	bodiesMu sync.Mutex
 }
 
 func projectRoot(t *testing.T) string {
@@ -75,6 +79,12 @@ func newEnv(t *testing.T, mutate func(*config.Config)) *testEnv {
 		LoginFailuresPerUsername:      1000,
 		RegisterRateLimitPerIPPerHour: 1000,
 		PasswordHashConcurrency:       4,
+
+		ClaudeInterpretModel:           "claude-opus-5-5",
+		ClaudeInterpretTimeoutSeconds:  10,
+		InterpretRateLimitPerHour:      1000,
+		InterpretRateLimitPerIPPerHour: 1000,
+		InterpretGlobalLimitPerHour:    1000,
 	}
 	if mutate != nil {
 		mutate(cfg)
@@ -99,7 +109,12 @@ func newEnv(t *testing.T, mutate func(*config.Config)) *testEnv {
 		t.Fatalf("Failed to create llm client: %v", err)
 	}
 	server := api.NewServer(cfg, store, val, reg, llmClient)
-	return &testEnv{t: t, handler: server.Router(), store: store, cfg: cfg, server: server}
+	interp, err := interpret.NewService(cfg, store, reg, val, llmClient)
+	if err != nil {
+		t.Fatalf("Failed to create interpretation service: %v", err)
+	}
+	server.SetInterpreter(interp)
+	return &testEnv{t: t, handler: server.Router(), store: store, cfg: cfg, server: server, interp: interp}
 }
 
 type reqOpt func(*http.Request)
@@ -137,7 +152,9 @@ func (e *testEnv) do(method, path, body string, opts ...reqOpt) *httptest.Respon
 	}
 	rec := httptest.NewRecorder()
 	e.handler.ServeHTTP(rec, req)
+	e.bodiesMu.Lock()
 	e.bodies = append(e.bodies, rec.Body.String())
+	e.bodiesMu.Unlock()
 	return rec
 }
 
@@ -431,6 +448,9 @@ func TestProtectedEndpointsRequireAuth(t *testing.T) {
 		{"GET", "/api/v1/jobs/job_x/spikes", ""},
 		{"GET", "/api/v1/jobs/job_x/export", ""},
 		{"GET", "/api/v1/jobs/job_x/artifacts/report.md", ""},
+		{"GET", "/api/v1/jobs/job_x/digest", ""},
+		{"GET", "/api/v1/jobs/job_x/interpretation", ""},
+		{"POST", "/api/v1/jobs/job_x/interpretation", `{"language":"en"}`},
 		{"POST", "/plans/parse", `{"prompt":"x"}`},
 		{"POST", "/jobs", `{"plan_id":"p"}`},
 		{"GET", "/jobs", ""},

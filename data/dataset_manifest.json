@@ -28,15 +28,26 @@
       "size_bytes": 86630944,
       "sha256": "94db8c650533bc36ffa3223f2e62325d5648b8d6bd31c3a4e1c804628c7557b3",
       "rows": 14687178,
-      "columns": [
-        "Presynaptic_ID",
-        "Postsynaptic_ID",
-        "Presynaptic_Index",
-        "Postsynaptic_Index",
-        "Connectivity",
-        "Excitatory",
-        "Excitatory x Connectivity"
-      ]
+      "columns": ["Presynaptic_ID", "Postsynaptic_ID", "Presynaptic_Index", "Postsynaptic_Index", "Connectivity", "Excitatory", "Excitatory x Connectivity"]
+    },
+    "annotations": {
+      "path": "data/Supplemental_file1_neuron_annotations.tsv",
+      "filename": "Supplemental_file1_neuron_annotations.tsv",
+      "size_bytes": 31720298,
+      "sha256": "b214970b55d2fbe0853bba536fdcb9e28730f4eb7ab06f600491df795da683cd",
+      "rows": 139248,
+      "optional": true,
+      "id_type": "int64_string",
+      "id_materialization": 783,
+      "url": "https://raw.githubusercontent.com/flyconnectome/flywire_annotations/a83b2776d60d5764cef36b927f5f9679c16c47a2/supplemental_files/Supplemental_file1_neuron_annotations.tsv",
+      "upstream_repository": "https://github.com/flyconnectome/flywire_annotations",
+      "upstream_commit": "a83b2776d60d5764cef36b927f5f9679c16c47a2",
+      "citation": "Schlegel et al., Nature 2024. doi:10.1038/s41586-024-07686-5",
+      "derived": {
+        "path": "data/annotations_630.tsv",
+        "columns": ["root_id", "flow", "super_class", "cell_class", "cell_sub_class", "cell_type", "hemibrain_type", "top_nt", "top_nt_conf", "side", "nerve"],
+        "note": "Rows of the source whose root_id (materialization 783) is also a v630 root id in the completeness table; derived by scripts/setup_data.sh. Neurons edited between v630 and v783 have no row (about 83% of v630 neurons are covered)."
+      }
     }
   },
   "default_model_parameters": {

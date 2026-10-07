@@ -1,0 +1,125 @@
+{
+  "schema_version": "1.1",
+  "dataset_id": "flywire_630",
+  "plan_hash": "hash_fixture_compare_silencing",
+  "experiment_type": "compare_silencing",
+  "max_hops": 4,
+  "units": {
+    "direct_input": "signed synapse count (excitatory +, inhibitory -) from the set directly onto the neuron",
+    "first_spike_ms": "ms after stimulus onset, trial 0",
+    "hops": "shortest directed synaptic path length; 0 = member of the set; null = more than 4 hops"
+  },
+  "stimulated_count": 21,
+  "silenced_count": 1,
+  "neurons": [
+    {
+      "root_id": "720575940000000001",
+      "first_spike_ms_A": 6.1,
+      "first_spike_ms_B": null,
+      "hops_from_stimulated": 2,
+      "direct_input_from_stimulated": 0,
+      "hops_from_silenced": 1,
+      "direct_input_from_silenced": 5,
+      "model_sign": -1
+    },
+    {
+      "root_id": "720575940612670570",
+      "first_spike_ms_A": 0.4,
+      "first_spike_ms_B": 0.4,
+      "hops_from_stimulated": 0,
+      "direct_input_from_stimulated": 0,
+      "hops_from_silenced": null,
+      "direct_input_from_silenced": 0,
+      "model_sign": 1
+    },
+    {
+      "root_id": "720575940616885538",
+      "first_spike_ms_A": 0.2,
+      "first_spike_ms_B": 0.2,
+      "hops_from_stimulated": 0,
+      "direct_input_from_stimulated": 0,
+      "hops_from_silenced": 0,
+      "direct_input_from_silenced": 0,
+      "model_sign": 1
+    },
+    {
+      "root_id": "720575940620900446",
+      "first_spike_ms_A": 1.0,
+      "first_spike_ms_B": 1.0,
+      "hops_from_stimulated": 0,
+      "direct_input_from_stimulated": 0,
+      "hops_from_silenced": null,
+      "direct_input_from_silenced": 0,
+      "model_sign": 1
+    },
+    {
+      "root_id": "720575940645521262",
+      "first_spike_ms_A": null,
+      "first_spike_ms_B": null,
+      "hops_from_stimulated": 3,
+      "direct_input_from_stimulated": 0,
+      "hops_from_silenced": 3,
+      "direct_input_from_silenced": 0,
+      "model_sign": null
+    },
+    {
+      "root_id": "720575940660219265",
+      "first_spike_ms_A": 9.5,
+      "first_spike_ms_B": 14.2,
+      "hops_from_stimulated": 3,
+      "direct_input_from_stimulated": 0,
+      "hops_from_silenced": 2,
+      "direct_input_from_silenced": 0,
+      "model_sign": 1
+    }
+  ],
+  "readout_first_spike_ms": {
+    "A": {
+      "720575940645521262": null,
+      "720575940660219265": 9.5
+    },
+    "B": {
+      "720575940645521262": null,
+      "720575940660219265": 14.2
+    }
+  },
+  "readout_inputs": {
+    "720575940645521262": {
+      "presynaptic_partners": 5,
+      "active_presynaptic_partners": 0,
+      "net_synapses_from_active_partners": 0,
+      "top_active_partners": []
+    },
+    "720575940660219265": {
+      "presynaptic_partners": 12,
+      "active_presynaptic_partners": 2,
+      "net_synapses_from_active_partners": 3,
+      "top_active_partners": [
+        {
+          "root_id": "720575940616885538",
+          "synapses": 7,
+          "model_sign": 1,
+          "hops_from_stimulated": 0
+        },
+        {
+          "root_id": "720575940000000001",
+          "synapses": -4,
+          "model_sign": -1,
+          "hops_from_stimulated": 2
+        }
+      ]
+    }
+  },
+  "lif_parameters": {
+    "v_0_mv": -52.0,
+    "v_rst_mv": -52.0,
+    "v_th_mv": -45.0,
+    "t_mbr_ms": 20.0,
+    "tau_ms": 5.0,
+    "t_rfc_ms": 2.2,
+    "t_dly_ms": 1.8,
+    "w_syn_mv": 0.275,
+    "f_poi": 250.0,
+    "dt_ms": 0.1
+  }
+}

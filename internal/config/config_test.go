@@ -80,3 +80,30 @@ func TestLoadConfigAbuseLimits(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadConfigInterpretation(t *testing.T) {
+	for _, k := range []string{"CLAUDE_INTERPRET_MODEL", "CLAUDE_INTERPRET_TIMEOUT_SECONDS", "INTERPRET_RATE_LIMIT_PER_HOUR",
+		"INTERPRET_RATE_LIMIT_PER_IP_PER_HOUR", "INTERPRET_GLOBAL_LIMIT_PER_HOUR"} {
+		t.Setenv(k, "")
+	}
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.ClaudeInterpretModel != "claude-opus-5-5" || cfg.ClaudeInterpretTimeoutSeconds != 180 ||
+		cfg.InterpretRateLimitPerHour != 20 || cfg.InterpretRateLimitPerIPPerHour != 40 || cfg.InterpretGlobalLimitPerHour != 100 {
+		t.Fatalf("unexpected interpretation defaults: model=%q timeout=%d user=%d ip=%d global=%d", cfg.ClaudeInterpretModel,
+			cfg.ClaudeInterpretTimeoutSeconds, cfg.InterpretRateLimitPerHour, cfg.InterpretRateLimitPerIPPerHour, cfg.InterpretGlobalLimitPerHour)
+	}
+	t.Setenv("INTERPRET_RATE_LIMIT_PER_HOUR", "0")
+	t.Setenv("CLAUDE_INTERPRET_TIMEOUT_SECONDS", "soon")
+	_, err = config.LoadConfig()
+	if err == nil {
+		t.Fatalf("malformed interpretation settings must be a startup error")
+	}
+	for _, want := range []string{"INTERPRET_RATE_LIMIT_PER_HOUR=0 must be >= 1", `CLAUDE_INTERPRET_TIMEOUT_SECONDS="soon" is not an integer`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err.Error(), want)
+		}
+	}
+}

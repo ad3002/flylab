@@ -10,6 +10,9 @@ pub struct DatasetFileInfo {
     pub size_bytes: usize,
     pub sha256: String,
     pub rows: usize,
+    /// Optional files (e.g. neuron annotations) may be absent without invalidating the dataset.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

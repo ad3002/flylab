@@ -1,8 +1,8 @@
 // FlyLab application: auth gate, composer, plan review, live runs, library, account.
 // Vanilla ES module. Every failure is shown on screen; nothing is only logged.
 
-import { SpikingNet, SpikeTrace, drawRasterThumb, drawResultRaster, hashString } from "/static/js/neural.js?v=motion2";
-import { isReduced, onReducedChange, finePointer, EASE, DUR, STAGGER, enter, stagger, countUp, splitLines, segIndicator, toast, onceVisible } from "/static/js/motion.js?v=motion2";
+import { SpikingNet, SpikeTrace, drawRasterThumb, drawResultRaster, hashString, COLORS } from "/static/js/neural.js?v=v3en";
+import { isReduced, onReducedChange, finePointer, EASE, DUR, STAGGER, enter, stagger, countUp, splitLines, segIndicator, toast, onceVisible } from "/static/js/motion.js?v=v3en";
 
 /* ================================================================== */
 /* helpers                                                             */
@@ -247,6 +247,9 @@ async function api(path, { method = "GET", body, headers = {}, gate = true } = {
   if (!res.ok) {
     const e = data && data.error ? data.error : {};
     const err = new ApiError(res.status, e.code || `HTTP_${res.status}`, e.message || `${method} ${path} failed with HTTP ${res.status}`, e.request_id || res.headers.get("X-Request-ID"));
+    err.details = e.details && typeof e.details === "object" ? e.details : null;
+    const ra = Number(res.headers.get("Retry-After"));
+    err.retryAfter = Number.isFinite(ra) && ra > 0 ? ra : null;
     if (res.status === 401 && gate) onSessionLost();
     throw err;
   }
@@ -317,6 +320,7 @@ const state = {
   lang: "auto",
   lastPlan: null,
   lastParseNotice: null,
+  aiLang: null, // ru/en picked in an AI panel this session; overrides the per-run default
 };
 const timers = new Set();
 let routeGen = 0;
@@ -385,6 +389,8 @@ function resetPrivateState() {
   state.lastPlan = null;
   state.lang = "auto";
   state.lastParseNotice = null;
+  state.aiLang = null;
+  aiReset();
 }
 
 function onSessionLost() {
@@ -697,7 +703,7 @@ function route() {
   window.scrollTo(0, 0);
   if (r.name === "new") renderNew(r.params);
   else if (r.name === "history") renderHistory();
-  else if (r.name === "job" && r.id) renderJobPage(r.id);
+  else if (r.name === "job" && r.id) renderJobPage(r.id, r.params);
   else if (r.name === "account") renderAccount();
   else renderMissing();
   swapIn();
@@ -832,7 +838,7 @@ const CHIPS = [
   "Activate sugar GRNs at 100 Hz and read out MN9",
   "Compare bitter GRN activation with and without silencing the top sugar neuron, read out MN9",
   "Ir94e neurons at 80 Hz for 500 ms, three repeats",
-  "Стимулируй сахарные рецепторы на 50 Гц, замолчи один нейрон и сравни MN9",
+  "Sugar GRNs at 50 Hz, silence one sugar neuron and compare MN9",
 ];
 
 function detectLang(text) { return /[а-яё]/i.test(text) ? "ru" : "en"; }
@@ -1052,7 +1058,12 @@ function renderNew(params) {
         planId: p.planId, prompt: p.prompt, title, slot: runSlot, key,
         onCreated: (job) => {
           runSlot.replaceChildren();
-          mountJob(runSlot, job, { compact: true, onStatus: (j, prev) => { if (j.status !== prev) refreshRecentCard(recent, j); } });
+          mountJob(runSlot, job, {
+            compact: true,
+            onStatus: (j, prev) => { if (j.status !== prev) refreshRecentCard(recent, j); },
+            // the run is done: offer to ask Claude what it might mean, right under its results
+            onSucceeded: (j) => { const slot = h("div", { class: "ai-slot" }); runSlot.append(slot); aiCta(slot, j); },
+          });
           loadRecent(recent, gen);
           runSlot.scrollIntoView({ behavior: isReduced() ? "auto" : "smooth", block: "start" });
         },
@@ -1262,8 +1273,7 @@ async function loadRecent(root, gen) {
 // The in-flight run's entry in "Recent runs" follows its status (queued -> running -> done), so
 // the strip never shows a stale "Queued" next to a run that is visibly running.
 function refreshRecentCard(root, job) {
-  const href = `#/job/${encodeURIComponent(job.job_id)}`;
-  const old = [...root.querySelectorAll(".job-card")].find((a) => a.getAttribute("href") === href);
+  const old = [...root.querySelectorAll(".job-card")].find((c) => c.dataset.jobId === job.job_id);
   if (!old) return;
   const card = jobCard(job, { aspect: 4 / 3 });
   old.replaceWith(card);
@@ -1298,14 +1308,18 @@ function jobCard(job, { aspect }) {
   const marker = job.plan_error ? "Plan unreadable" : "Summary unreadable";
   // a plain click flies the thumbnail into the run page (modified clicks open normally)
   const onclick = (e) => { if (e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) flipCapture(c); };
-  return h("a", { class: `job-card${errs.length ? " has-error" : ""}`, href: `#/job/${encodeURIComponent(job.job_id)}`, onclick, "aria-label": `${title} — ${STATUS_LABEL[job.status] || job.status}${errs.length ? ` — ${marker}` : ""}` },
+  const thumbTop = h("div", { class: "thumb-top" }, statusChip(job.status));
+  // The card is a frame holding the link (thumbnail + text) and, for finished runs, the AI action
+  // row: a button may not live inside a link, and the action must not open the run.
+  const link = h("a", { class: "job-link", href: `#/job/${encodeURIComponent(job.job_id)}`, onclick, "aria-label": `${title} — ${STATUS_LABEL[job.status] || job.status}${errs.length ? ` — ${marker}` : ""}` },
     h("div", { class: "job-thumb" }, c,
-      h("div", { class: "thumb-top" }, statusChip(job.status)),
+      thumbTop,
       errs.length ? h("span", { class: "thumb-error", title: errs.join("\n"), text: errs.length > 1 ? "Plan + summary unreadable" : marker }) : null),
     h("div", { class: "job-body" },
       h("p", { class: "job-title", text: title }),
       errs.map((e) => h("p", { class: "job-err mono", text: e })),
       h("p", { class: "job-meta mono" }, counts, h("span", { text: relTime(job.created_at), title: absTime(job.created_at) }))));
+  return h("div", { class: `job-card${errs.length ? " has-error" : ""}`, dataset: { jobId: job.job_id } }, link, cardAi(job, thumbTop, title));
 }
 
 class Masonry {
@@ -1454,7 +1468,7 @@ function emptyLibrary(filter) {
 const STAGES = ["queued", "loading", "building", "simulating", "aggregating", "exporting"];
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 
-function mountJob(root, job, { compact = false, onStatus = null } = {}) {
+function mountJob(root, job, { compact = false, onStatus = null, onSucceeded = null } = {}) {
   const gen = routeGen;
   // A run that is already over when mounted assembles its stage dots in sequence.
   const stageList = h("ol", { class: "stages", "aria-label": "Run stages" }, STAGES.map((s, i) => h("li", { "data-stage": s, text: s, style: TERMINAL.has(job.status) ? `--si:${i}` : null })));
@@ -1573,6 +1587,7 @@ function mountJob(root, job, { compact = false, onStatus = null } = {}) {
       if (data.status === "succeeded") {
         live.classList.add("finished");
         renderResults(results, current, { delay: art && !isReduced() ? 540 : 0 });
+        if (onSucceeded) onSucceeded(current);
       } else if (data.status === "failed") {
         live.classList.add("finished");
         msg.replaceChildren(banner("error", "The simulation failed", current.error_message || "The worker reported a failure without a message.", { meta: current.error_code || null }));
@@ -1600,8 +1615,10 @@ function mountJob(root, job, { compact = false, onStatus = null } = {}) {
   paint(job);
   if (TERMINAL.has(job.status)) {
     live.classList.add("finished");
-    if (job.status === "succeeded") renderResults(results, job);
-    else if (job.status === "failed") msg.replaceChildren(banner("error", "The simulation failed", job.error_message || "The worker reported a failure without a message.", { meta: job.error_code || null }));
+    if (job.status === "succeeded") {
+      renderResults(results, job);
+      if (onSucceeded) onSucceeded(job);
+    } else if (job.status === "failed") msg.replaceChildren(banner("error", "The simulation failed", job.error_message || "The worker reported a failure without a message.", { meta: job.error_code || null }));
     else msg.replaceChildren(banner("info", "Run cancelled", "Nothing was kept from this run."));
   } else {
     poll();
@@ -1825,7 +1842,7 @@ function drawIn(canvas, wrap, delay = 0) {
 /* #/job/<id>                                                          */
 /* ================================================================== */
 
-async function renderJobPage(jobId) {
+async function renderJobPage(jobId, params = new URLSearchParams()) {
   document.title = "Run — FlyLab";
   const gen = routeGen;
   const root = h("section", { class: "job-page" });
@@ -1897,6 +1914,30 @@ async function renderJobPage(jobId) {
   const runTimeDd = h("dd", { text: job.finished_at ? fmtDur(secondsBetween(job.started_at || job.created_at, job.finished_at)) : "" });
   const runTimeRow = h("div", { class: "spec", hidden: !job.finished_at }, h("dt", { text: "Run time" }), runTimeDd);
   let heroStatus = job.status;
+  // AI hypotheses: a panel below the results, and a prominent action in the hero that leads to it
+  // (and starts an interpretation when the run has none yet). Both appear once the run succeeded.
+  const aiSlot = h("div", { class: "ai-slot" });
+  const aiBtn = h("button", { class: "btn ai-hero-btn", type: "button", hidden: true });
+  let aiPanel = null;
+  // Labelled in the language of the stored hypotheses once there are some (the panel switches
+  // to it too), else in the default language.
+  const paintAiBtn = (has, lang) => {
+    const L = aiT(lang || (has && job.interpretation_language) || aiDefaultLang(job));
+    aiBtn.dataset.has = String(has);
+    aiBtn.replaceChildren(h("span", { class: "ai-glyph", "aria-hidden": "true" }), h("span", { lang: L.code, text: has ? L.viewHyp : L.interpret }));
+  };
+  paintAiBtn(job.has_interpretation === true);
+  const ensureAi = (opts = {}) => {
+    aiBtn.hidden = false;
+    if (!aiPanel) aiPanel = mountAiPanel(aiSlot, job, { ...opts, onHas: paintAiBtn });
+    return aiPanel;
+  };
+  aiBtn.addEventListener("click", () => {
+    const p = ensureAi();
+    if (aiBtn.dataset.has !== "true") p.start();
+    p.reveal();
+  });
+  const onSucceeded = () => ensureAi({ scroll: params.get("ai") === "1" });
   const onStatus = (j) => {
     if (j.finished_at) {
       runTimeRow.hidden = false;
@@ -1927,10 +1968,11 @@ async function renderJobPage(jobId) {
           runTimeRow,
           plan ? metaRow("Repeats · seed", `${plan.repeats} · ${plan.base_seed}`) : null,
           metaRow("Plan", h("span", { class: "mono", text: job.plan_id }))),
-        h("div", { class: "job-actions" }, againBtn, copyBtn, copyStatus),
+        h("div", { class: "job-actions" }, againBtn, aiBtn, copyBtn, copyStatus),
         againSlot)),
     job.summary_error ? banner("error", "This run’s summary file is corrupted", job.summary_error) : null,
     h("div", { class: "job-live" }),
+    aiSlot,
     plan ? h("details", { class: "json" }, h("summary", { text: "Plan JSON" }), h("pre", { class: "mono", text: JSON.stringify(plan, null, 2) })) : null,
   ].filter(Boolean));
   // the page settles in after the skeleton: info column and the rest in a short cascade. During a
@@ -1938,7 +1980,1058 @@ async function renderJobPage(jobId) {
   const flying = Boolean(flip && !flip.landed);
   requestAnimationFrame(() => { drawRasterThumb(art, thumbFor(job)); flipSettle(); });
   stagger(root.querySelector(".job-info").children, { start: flying ? 480 : 0, step: 50, y: 10, duration: DUR.enter });
-  mountJob(root.querySelector(".job-live"), job, { compact: false, onStatus });
+  mountJob(root.querySelector(".job-live"), job, { compact: false, onStatus, onSucceeded });
+}
+
+/* ================================================================== */
+/* AI hypotheses (v3): run digest → Claude → hypotheses for review      */
+/* ================================================================== */
+
+/* Visual grammar of this panel: solid rules and plain chips are things FlyLab computed (or that
+   Claude restated from them); dashed cyan outlines are things Claude proposed. The disclaimer
+   stamp sits above the content in every state and is never collapsible. */
+
+const AI_DISCLAIMER = {
+  en: "AI-generated hypotheses about a computational model. They are not established biological findings and must be evaluated by an expert.",
+  ru: "Гипотезы, сгенерированные ИИ, о вычислительной модели. Это не установленные биологические факты; их должен оценить эксперт.",
+};
+
+const fmtWait = (s, ru) => (s < 60 ? `${Math.ceil(s)} ${ru ? "с" : "s"}` : `${Math.ceil(s / 60)} ${ru ? "мин" : "min"}`);
+
+const AI_T = {
+  en: {
+    code: "en",
+    eyebrow: "Claude · interpretation",
+    title: "AI hypotheses",
+    stampTitle: "AI-generated assumptions for expert review",
+    disclaimerMissing: "The server sent no disclaimer with this result; the standard wording is shown.",
+    legendSolid: "Solid: restated from the run’s numbers",
+    legendDashed: "Dashed: proposed by Claude",
+    langLabel: "Language of the hypotheses",
+    intro: "Claude reads a digest of this run — the numbers FlyLab computed, FlyWire cell annotations and the model’s limits — and proposes hypotheses about what the activity might mean. Each one cites its evidence and comes with an experiment you can run to test it.",
+    generate: "Generate hypotheses",
+    interpret: "Interpret",
+    viewHyp: "View hypotheses",
+    regenerate: "Regenerate",
+    regenerateIn: "Regenerate in English",
+    checking: "Checking for saved hypotheses…",
+    loadTitle: "Claude is reading this run",
+    loadSub: (m) => `Building the digest, then asking ${m || "Claude"}`,
+    loadNote: "Usually 30–120 s. You can keep browsing: the result is saved with this run and shows up here and in the Library.",
+    loadSlow: "Still working. If Claude does not answer in time, the server stops waiting and the reason appears here.",
+    loadSr: "Generating hypotheses. This can take a couple of minutes.",
+    regenerating: (l) => `Regenerating in ${l === "ru" ? "Russian" : "English"}`,
+    regenNote: "The current hypotheses stay until the new ones arrive.",
+    headline: "In one sentence",
+    observations: "Observations",
+    obsSub: "Numbers from the digest, restated without interpretation",
+    hypotheses: "Hypotheses",
+    hypSub: "For you to evaluate — ordered as Claude gave them",
+    noHyp: "Claude returned no hypotheses for this run.",
+    conf: { low: "Low confidence", medium: "Medium confidence", high: "High confidence" },
+    confUnknown: (v) => `Confidence “${v}” (not low, medium or high)`,
+    why: "Why",
+    evidence: "Evidence",
+    evidenceFilter: "Show this in “What the AI saw”",
+    notInDigest: "not in digest",
+    caveats: "Caveats",
+    test: "Proposed test",
+    expected: "If the hypothesis holds",
+    runTest: "Run this test",
+    testPrefix: "Test: ",
+    planInvalid: "This test plan did not pass validation",
+    noPlanId: "This test cannot be run",
+    noPlanIdBody: "The server returned neither a plan id nor a validation error for it.",
+    noTest: "No test was proposed for this hypothesis.",
+    testJson: "Test plan JSON",
+    evWarnTitle: "Some evidence names neurons the digest does not contain",
+    evWarnBody: "Claude cited ids that FlyLab computed nothing for. Treat those points as unsupported; they are marked “not in digest” below.",
+    coverageTitle: "Low annotation coverage",
+    digestErrTitle: "The digest of this run could not be built",
+    digestWarnTitle: "The digest carries a warning",
+    statementWord: "statement",
+    testWord: "test plan",
+    observationWord: "Observation",
+    noDigest: "The response carried no digest, so “What the AI saw” is unavailable for this result.",
+    limitations: "Limitations",
+    reading: "Suggested reading",
+    saw: "What the AI saw",
+    willSee: "What the AI will see",
+    sawSub: "The digest sent to Claude, as tables",
+    digestLoading: "Building the digest…",
+    filter: "Filter rows",
+    filterPh: "neuron id, cell type, class…",
+    clear: "Clear",
+    rowsMatch: (n, t) => `${n} of ${t} rows match`,
+    noRows: "No row matches this filter.",
+    summary: "Summary",
+    empty: "empty",
+    yes: "yes", no: "no",
+    foot: { cached: "saved result", fresh: "generated now", lang: "language" },
+    retry: "Try again",
+    generateAnyway: "Generate hypotheses",
+    replaceCorrupt: "Replace with new hypotheses",
+    rebuild: "Rebuild and generate",
+    retryIn: (s) => `You can try again in ${fmtWait(s, false)}.`,
+    err: {
+      default: "Interpretation failed",
+      check: "Saved hypotheses could not be loaded",
+      inFlight: "Another interpretation is running",
+      INTERPRETATION_CORRUPT: "The saved hypotheses of this run are unreadable",
+      DIGEST_ERROR: "The digest of this run could not be built",
+      DIGEST_BUSY: "Another run’s digest is being computed",
+      401: "You are signed out",
+      404: "This run was not found",
+      409: "This run has not finished yet",
+      429: "Interpretation limit reached",
+      502: "Claude could not produce hypotheses",
+      503: "Claude is busy right now",
+    },
+    lastFailed: "The last attempt failed",
+    toastReady: (t) => `Hypotheses ready · ${t}`,
+    failedTitle: (t) => `Interpretation failed · ${t}`,
+    openRun: "Open the run",
+    dismiss: "Dismiss",
+    waiting: "Waiting",
+    waitingFor: (t) => `One interpretation runs at a time: this one can start when “${t}” is done.`,
+    testWarnTitle: "This test may not discriminate as written",
+    calibTitle: "Confidence check",
+    interpreting: "Interpreting",
+    markTitle: "This run has AI hypotheses",
+    cta: "Ask AI what this might mean",
+    ctaSub: "Claude proposes hypotheses from this run’s numbers, each with a test you can run. Hypotheses, not findings.",
+    untitled: "Untitled hypothesis",
+  },
+  ru: {
+    code: "ru",
+    eyebrow: "Claude · интерпретация",
+    title: "Гипотезы ИИ",
+    stampTitle: "Предположения, сгенерированные ИИ, для проверки экспертом",
+    disclaimerMissing: "Сервер не прислал предупреждение к этому результату; показана стандартная формулировка.",
+    legendSolid: "Сплошная линия: пересказ чисел запуска",
+    legendDashed: "Пунктир: предложено Claude",
+    langLabel: "Язык гипотез",
+    intro: "Claude читает сводку этого запуска — числа, посчитанные FlyLab, аннотации клеток FlyWire и ограничения модели — и предлагает гипотезы о том, что может означать эта активность. К каждой приложены доказательства и эксперимент, которым её можно проверить.",
+    generate: "Сгенерировать гипотезы",
+    interpret: "Интерпретировать",
+    viewHyp: "Смотреть гипотезы",
+    regenerate: "Сгенерировать заново",
+    regenerateIn: "Сгенерировать заново на русском",
+    checking: "Проверяем сохранённые гипотезы…",
+    loadTitle: "Claude читает этот запуск",
+    loadSub: (m) => `Собираем сводку и спрашиваем ${m || "Claude"}`,
+    loadNote: "Обычно 30–120 с. Можно продолжать работу: результат сохранится в этом запуске и появится здесь и в библиотеке.",
+    loadSlow: "Всё ещё работаем. Если Claude не ответит вовремя, сервер прекратит ожидание, и причина появится здесь.",
+    loadSr: "Генерируем гипотезы. Это может занять пару минут.",
+    regenerating: (l) => `Генерируем заново на ${l === "ru" ? "русском" : "английском"}`,
+    regenNote: "Текущие гипотезы останутся, пока не придут новые.",
+    headline: "В одном предложении",
+    observations: "Наблюдения",
+    obsSub: "Числа из сводки, пересказанные без интерпретации",
+    hypotheses: "Гипотезы",
+    hypSub: "Для вашей оценки — в порядке, в котором их дал Claude",
+    noHyp: "Claude не предложил гипотез для этого запуска.",
+    conf: { low: "Низкая уверенность", medium: "Средняя уверенность", high: "Высокая уверенность" },
+    confUnknown: (v) => `Уверенность «${v}» (не low, medium или high)`,
+    why: "Почему",
+    evidence: "Доказательства",
+    evidenceFilter: "Показать в «Что видел ИИ»",
+    notInDigest: "нет в сводке",
+    caveats: "Оговорки",
+    test: "Предлагаемая проверка",
+    expected: "Если гипотеза верна",
+    runTest: "Запустить проверку",
+    testPrefix: "Проверка: ",
+    planInvalid: "План этой проверки не прошёл валидацию",
+    noPlanId: "Эту проверку нельзя запустить",
+    noPlanIdBody: "Сервер не вернул для неё ни id плана, ни ошибку валидации.",
+    noTest: "Для этой гипотезы проверка не предложена.",
+    testJson: "JSON плана проверки",
+    evWarnTitle: "Часть доказательств ссылается на нейроны, которых нет в сводке",
+    evWarnBody: "Claude сослался на id, для которых FlyLab ничего не считал. Считайте эти пункты неподтверждёнными; ниже они помечены «нет в сводке».",
+    coverageTitle: "Низкое покрытие аннотациями",
+    digestErrTitle: "Не удалось собрать сводку этого запуска",
+    digestWarnTitle: "В сводке есть предупреждение",
+    statementWord: "утверждение",
+    testWord: "план проверки",
+    observationWord: "Наблюдение",
+    noDigest: "В ответе нет сводки, поэтому «Что видел ИИ» для этого результата недоступно.",
+    limitations: "Ограничения",
+    reading: "Что почитать",
+    saw: "Что видел ИИ",
+    willSee: "Что увидит ИИ",
+    sawSub: "Сводка, отправленная Claude, в виде таблиц",
+    digestLoading: "Собираем сводку…",
+    filter: "Фильтр строк",
+    filterPh: "id нейрона, тип клетки, класс…",
+    clear: "Сбросить",
+    rowsMatch: (n, t) => `Совпало строк: ${n} из ${t}`,
+    noRows: "Ни одна строка не подходит под фильтр.",
+    summary: "Сводка",
+    empty: "пусто",
+    yes: "да", no: "нет",
+    foot: { cached: "сохранённый результат", fresh: "только что", lang: "язык" },
+    retry: "Повторить",
+    generateAnyway: "Сгенерировать гипотезы",
+    replaceCorrupt: "Заменить новыми гипотезами",
+    rebuild: "Пересобрать и сгенерировать",
+    retryIn: (s) => `Повторить можно через ${fmtWait(s, true)}.`,
+    err: {
+      default: "Интерпретация не удалась",
+      check: "Не удалось загрузить сохранённые гипотезы",
+      inFlight: "Уже идёт другая интерпретация",
+      INTERPRETATION_CORRUPT: "Сохранённые гипотезы этого запуска повреждены",
+      DIGEST_ERROR: "Не удалось собрать сводку этого запуска",
+      DIGEST_BUSY: "Сейчас считается сводка другого запуска",
+      401: "Вы вышли из аккаунта",
+      404: "Запуск не найден",
+      409: "Запуск ещё не завершён",
+      429: "Лимит интерпретаций исчерпан",
+      502: "Claude не смог сформулировать гипотезы",
+      503: "Claude сейчас занят",
+    },
+    lastFailed: "Последняя попытка не удалась",
+    toastReady: (t) => `Гипотезы готовы · ${t}`,
+    failedTitle: (t) => `Интерпретация не удалась · ${t}`,
+    openRun: "Открыть запуск",
+    dismiss: "Закрыть",
+    waiting: "Ожидание",
+    waitingFor: (t) => `Интерпретации идут по одной: эта начнётся, когда закончится «${t}».`,
+    testWarnTitle: "В таком виде проверка может ничего не различить",
+    calibTitle: "Проверка уверенности",
+    interpreting: "Интерпретируем",
+    markTitle: "У этого запуска есть гипотезы ИИ",
+    cta: "Спросить ИИ, что это может значить",
+    ctaSub: "Claude предложит гипотезы по числам этого запуска, к каждой — проверку, которую можно запустить. Гипотезы, а не выводы.",
+    untitled: "Гипотеза без названия",
+  },
+};
+const aiT = (lang) => AI_T[lang] || AI_T.en;
+
+// Default language of a run's panel: English (the site is English), unless the user explicitly
+// picked Russian in a panel this session or set the report-language toggle to RU.
+function aiDefaultLang(job) {
+  if (state.aiLang === "ru" || state.aiLang === "en") return state.aiLang;
+  if (state.lang === "ru") return "ru";
+  return "en"; // the site is English; Russian hypotheses only when picked explicitly
+}
+// The interpretation model, when the server reports it; otherwise the UI just says "Claude".
+const aiModelName = () => (state.caps && (state.caps.interpret_model || state.caps.llm_interpret_model)) || null;
+
+/* Requests outlive the view that started them: a Library card or a run page can be left while
+   Claude works. The in-flight record, the latest result and the latest failure are kept per job,
+   so whichever view of that job is on screen next shows the progress, the result or the error. */
+const aiStore = { epoch: 0, inflight: new Map(), cache: new Map(), errors: new Map(), digests: new Map() };
+function aiReset() {
+  aiStore.epoch++;
+  aiStore.inflight.clear();
+  aiStore.cache.clear();
+  aiStore.errors.clear();
+  aiStore.digests.clear();
+}
+
+function checkInterpretation(data, where) {
+  const it = data && data.interpretation;
+  if (!it || typeof it !== "object" || !Array.isArray(it.hypotheses)) {
+    throw new ApiError(200, "BAD_SHAPE", `${where} answered without interpretation.hypotheses`);
+  }
+  return data;
+}
+
+function aiRequest(jobId, lang, regenerate, label) {
+  const cur = aiStore.inflight.get(jobId);
+  if (cur) return cur;
+  const epoch = aiStore.epoch;
+  const rec = { jobId, label: label || jobId, started: performance.now(), lang, regenerate: Boolean(regenerate), promise: null };
+  aiStore.errors.delete(jobId);
+  rec.promise = api(`/api/v1/jobs/${encodeURIComponent(jobId)}/interpretation`, { method: "POST", body: { language: lang, regenerate: Boolean(regenerate) } })
+    .then(({ data }) => {
+      checkInterpretation(data, "POST /interpretation");
+      if (epoch === aiStore.epoch) {
+        aiStore.cache.set(jobId, data);
+        aiStore.errors.delete(jobId);
+        // a confirmation wherever the user is now; failures are shown inline by the job's views
+        toast(aiT(lang).toastReady(label || jobId));
+      }
+      return data;
+    }, (err) => {
+      if (epoch === aiStore.epoch) {
+        aiStore.errors.set(jobId, err);
+        // The request may have run for minutes while the user went elsewhere: a failure is
+        // announced wherever they are (like a success), unless this run's page is open, where
+        // the panel shows it inline. It stays until dismissed.
+        if (!location.hash.startsWith(`#/job/${encodeURIComponent(jobId)}`)) aiFailNotice(lang, label || jobId, jobId, err);
+      }
+      throw err;
+    })
+    .finally(() => { if (aiStore.inflight.get(jobId) === rec) aiStore.inflight.delete(jobId); });
+  // Every view of this job attaches its own handlers; this one only keeps a failure that happens
+  // while no view is attached from becoming an unhandled rejection. The failure itself is kept in
+  // aiStore.errors and shown by the next card or panel of this job.
+  rec.promise.catch(() => {});
+  aiStore.inflight.set(jobId, rec);
+  return rec;
+}
+
+async function fetchDigest(jobId) {
+  if (aiStore.digests.has(jobId)) return aiStore.digests.get(jobId);
+  const { data } = await api(`/api/v1/jobs/${encodeURIComponent(jobId)}/digest`);
+  if (!data || typeof data !== "object") throw new ApiError(200, "BAD_SHAPE", "GET /digest did not return an object");
+  if (data.digest_error) throw new ApiError(200, "DIGEST_ERROR", String(data.digest_error));
+  const dg = data.digest && typeof data.digest === "object" ? data.digest : data;
+  aiStore.digests.set(jobId, dg);
+  return dg;
+}
+
+/* ---------- errors, localized titles, server message verbatim ---------- */
+// Title by error code first (a corrupt result, a digest problem or a busy digest slot are not
+// "Claude" problems), then the 429 scope, then the HTTP status.
+function aiErrTitle(L, err) {
+  if (!err) return L.err.default;
+  if (err.code && L.err[err.code]) return L.err[err.code];
+  if (err.status === 429 && err.details && err.details.scope === "user_in_flight") return L.err.inFlight;
+  return (err.status && L.err[err.status]) || L.err.default;
+}
+// Errors the server recovers from only with regenerate:true (a stored result it cannot read,
+// a digest it could not build): the retry actions then send it.
+const aiNeedsRegen = (err) => Boolean(err && (err.code === "INTERPRETATION_CORRUPT" || err.code === "DIGEST_ERROR"));
+// "You can try again in N s" for 429/503, unless the server message already says when.
+function aiRetryNote(L, err) {
+  if (!err || (err.status !== 429 && err.status !== 503)) return null;
+  const s = (err.details && Number(err.details.retry_after_seconds)) || err.retryAfter;
+  if (!(s > 0) || /retry in \d+\s*s\b|try again shortly/i.test(err.message || "")) return null;
+  return L.retryIn(s);
+}
+function aiErrorBanner(L, err, actions = [], titleOverride = null) {
+  const b = errorBanner(titleOverride || aiErrTitle(L, err), err, actions);
+  const note = aiRetryNote(L, err);
+  if (note) b.querySelector(".b-body").append(" ", note);
+  return b;
+}
+// A failure notice that stays on screen (bottom corner) until dismissed, with a link to the run.
+function aiFailNotice(lang, label, jobId, err) {
+  const L = aiT(lang);
+  let host = document.querySelector(".ai-notices");
+  if (!host) {
+    host = h("div", { class: "ai-notices" });
+    document.body.append(host);
+  }
+  const note = aiRetryNote(L, err);
+  const close = h("button", { class: "btn btn-ghost btn-sm", type: "button", text: L.dismiss });
+  const card = h("div", { class: "ai-notice", role: "alert", lang: L.code },
+    h("p", { class: "ai-notice-title", text: L.failedTitle(label) }),
+    h("p", { class: "ai-notice-body" }, h("b", { text: `${aiErrTitle(L, err)}: ` }), (err && err.message) || String(err), note ? ` ${note}` : ""),
+    errorMeta(err) ? h("p", { class: "ai-notice-meta mono", text: errorMeta(err) }) : null,
+    h("div", { class: "ai-notice-actions" },
+      h("a", { class: "btn btn-sm", href: `#/job/${encodeURIComponent(jobId)}?ai=1`, text: L.openRun, onclick: () => card.remove() }),
+      close));
+  close.addEventListener("click", () => card.remove());
+  host.append(card);
+  while (host.childElementCount > 3) host.firstElementChild.remove();
+  enter(card, { y: 10, duration: DUR.view });
+}
+
+/* ---------- the permanent label + disclaimer ---------- */
+function aiStamp(L, disclaimer) {
+  const text = typeof disclaimer === "string" && disclaimer.trim() ? disclaimer : null;
+  return h("div", { class: "ai-stamp", role: "note", "aria-label": L.stampTitle },
+    h("span", { class: "ai-stamp-mark", "aria-hidden": "true" }),
+    h("div", null,
+      h("p", { class: "ai-stamp-title", text: L.stampTitle }),
+      h("p", { class: "ai-stamp-body", text: text || AI_DISCLAIMER[L.code] }),
+      disclaimer !== undefined && !text ? h("p", { class: "ai-stamp-meta mono", text: L.disclaimerMissing }) : null));
+}
+const aiLegend = (L) => h("p", { class: "ai-legend mono" },
+  h("span", null, h("i", { class: "lg-solid", "aria-hidden": "true" }), L.legendSolid),
+  h("span", null, h("i", { class: "lg-dash", "aria-hidden": "true" }), L.legendDashed));
+
+/* ---------- evidence chips ---------- */
+// evidence_warnings: {location, kind, neuron_id?, reference?, text, message}. Each one is shown
+// where it applies (chip, statement, test plan, reading item) and listed in a banner.
+function normWarnings(ws) {
+  if (!Array.isArray(ws)) return [];
+  return ws.map((w) => {
+    if (w === null || w === undefined) return null;
+    if (typeof w !== "object") return { message: String(w), text: String(w), location: null, id: null };
+    return {
+      message: String(w.message || w.warning || w.text || JSON.stringify(w)),
+      text: typeof w.text === "string" ? w.text : "",
+      location: typeof w.location === "string" ? w.location : null,
+      id: w.neuron_id || w.reference || null,
+    };
+  }).filter(Boolean);
+}
+const warnsAt = (ctx, loc) => ctx.warnings.filter((w) => w.location === loc);
+function warnLoc(loc, L) {
+  const m = String(loc || "").match(/^(observations|hypotheses|suggested_reading)\[(\d+)\](?:\.(evidence|statement|test\.plan)(?:\[(\d+)\])?)?$/);
+  if (!m) return loc || "";
+  const n = Number(m[2]) + 1;
+  const part = m[3] === "evidence" ? ` · ${L.evidence.toLowerCase()} ${Number(m[4]) + 1}` : m[3] === "statement" ? ` · ${L.statementWord}` : m[3] ? ` · ${L.testWord}` : "";
+  if (m[1] === "hypotheses") return `H${n}${part}`;
+  if (m[1] === "observations") return `${L.observationWord} ${n}${part}`;
+  return `${L.reading} ${n}`;
+}
+function warnLine(ws) {
+  if (!ws.length) return null;
+  return h("p", { class: "ai-inline-warn" }, ws.map((w, i) => [i ? "; " : "", w.message]));
+}
+const ROOT_ID = /\b\d{15,20}\b/;
+function evChips(items, L, ctx, locBase) {
+  if (!Array.isArray(items)) return null;
+  const list = items.map((x, j) => [x, j]).filter(([x]) => x !== null && x !== undefined && String(x).trim());
+  if (!list.length) return null;
+  const located = ctx.warnings.some((w) => w.location);
+  return h("div", { class: "ev-row" }, list.map(([ev, j]) => {
+    const text = String(ev);
+    const id = (text.match(ROOT_ID) || [])[0] || null;
+    // structured warnings name the exact chip; plain-string warnings fall back to text matching
+    const here = located ? warnsAt(ctx, `${locBase}[${j}]`) : ctx.warnings.filter((w) => w.message.includes(text) || (id && w.message.includes(id)));
+    const flagged = here.length > 0;
+    return h("button", {
+      type: "button", class: `ev mono${flagged ? " ev-warn" : ""}`,
+      title: [flagged ? here.map((w) => w.message).join("; ") : null, ctx.canPick ? L.evidenceFilter : null].filter(Boolean).join(" — ") || null,
+      disabled: ctx.canPick ? null : true,
+      onclick: () => ctx.pick(id || text),
+    }, h("span", { text }), flagged ? h("span", { class: "ev-flag", text: L.notInDigest }) : null);
+  }));
+}
+
+function confBadge(L, level) {
+  const known = ["low", "medium", "high"].indexOf(level);
+  const n = known + 1;
+  return h("span", { class: `conf${known < 0 ? " conf-bad" : ""}`, "data-level": known < 0 ? "unknown" : level },
+    h("span", { class: "conf-ticks", "aria-hidden": "true" }, [1, 2, 3].map((i) => h("i", { class: i <= n ? "on" : null, style: `--ti:${i - 1}` }))),
+    h("span", { text: known < 0 ? L.confUnknown(String(level)) : L.conf[level] }));
+}
+
+/* ---------- one hypothesis ---------- */
+function hypCard(hy, i, L, ctx) {
+  const tid = `hyp-${ctx.uid}-${i}`;
+  const caveats = Array.isArray(hy.caveats) ? hy.caveats.filter(Boolean) : [];
+  return h("article", { class: "hyp", "aria-labelledby": tid, style: `--hi:${i}` },
+    h("header", { class: "hyp-head" },
+      h("span", { class: "hyp-n mono", text: `H${i + 1}` }),
+      h("h4", { class: "hyp-title", id: tid, text: hy.title || L.untitled }),
+      confBadge(L, hy.confidence)),
+    hy.confidence_reason ? h("p", { class: "hyp-reason" }, h("span", { class: "hyp-label", text: `${L.why}: ` }), hy.confidence_reason) : null,
+    hy.calibration_warning ? h("p", { class: "ai-inline-warn hyp-calib" }, h("b", { text: `${L.calibTitle}: ` }), String(hy.calibration_warning)) : null,
+    hy.statement ? h("p", { class: "hyp-statement", text: hy.statement }) : null,
+    warnLine(warnsAt(ctx, `hypotheses[${i}].statement`)),
+    Array.isArray(hy.evidence) && hy.evidence.length ? h("div", { class: "hyp-block" }, h("p", { class: "hyp-label", text: L.evidence }), evChips(hy.evidence, L, ctx, `hypotheses[${i}].evidence`)) : null,
+    caveats.length ? h("div", { class: "hyp-block" }, h("p", { class: "hyp-label", text: L.caveats }), h("ul", { class: "hyp-caveats" }, caveats.map((c) => h("li", { text: c })))) : null,
+    testBlock(hy, L, ctx, i));
+}
+
+function testBlock(hy, L, ctx, i) {
+  const test = hy.test;
+  if (!test || typeof test !== "object") return h("p", { class: "muted small hyp-notest", text: L.noTest });
+  const slot = h("div", { class: "hyp-run-slot" });
+  let action;
+  if (test.plan_error) {
+    action = banner("error", L.planInvalid, String(test.plan_error), { meta: "plan_error" });
+  } else if (test.plan_id) {
+    const btn = h("button", { class: "btn btn-sm run-test", type: "button" }, h("span", { text: L.runTest }), h("span", { class: "arrow", "aria-hidden": "true", text: "→" }));
+    const guard = launchGuard(btn);
+    const title = `${L.testPrefix}${hy.title || L.untitled}`.slice(0, 120);
+    btn.addEventListener("click", () => guard(`${test.plan_id}\u0000${title}`, (key) => startRun({
+      planId: test.plan_id, prompt: test.description || hy.statement || "", title, slot, key,
+      onCreated: (nj) => { location.hash = `#/job/${encodeURIComponent(nj.job_id)}`; },
+    })));
+    action = h("div", { class: "hyp-test-actions" }, btn, h("span", { class: "mono dim", text: test.plan_id }));
+  } else {
+    action = banner("warn", L.noPlanId, L.noPlanIdBody);
+  }
+  const tws = Array.isArray(test.warnings) ? test.warnings.filter(Boolean) : [];
+  let twBanner = null;
+  if (tws.length) {
+    twBanner = banner("warn", L.testWarnTitle, null, { meta: "test.warnings" });
+    twBanner.children[1].append(h("ul", { class: "ai-warn-list" }, tws.map((w) => h("li", { text: String(w) }))));
+  }
+  return h("div", { class: "hyp-test" },
+    h("p", { class: "hyp-label", text: L.test }),
+    test.description ? h("p", { class: "hyp-test-desc", text: test.description }) : null,
+    test.expected_if_true ? h("p", { class: "hyp-expect" }, h("span", { class: "hyp-label", text: `${L.expected}: ` }), test.expected_if_true) : null,
+    test.plan && typeof test.plan === "object" ? h("p", { class: "hyp-test-plan mono", text: planShort(test.plan) }) : null,
+    warnLine(warnsAt(ctx, `hypotheses[${i}].test.plan`)),
+    twBanner,
+    action,
+    slot,
+    test.plan ? h("details", { class: "json" }, h("summary", { text: L.testJson }), h("pre", { class: "mono", text: JSON.stringify(test.plan, null, 2) })) : null);
+}
+
+/* ---------- the digest as readable tables ---------- */
+const isPlainObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const isScalar = (v) => v === null || typeof v !== "object";
+const DIGEST_FIRST = ["coverage", "experiment", "totals"];
+const DIGEST_RU = {
+  coverage: "Покрытие аннотациями", experiment: "Эксперимент", totals: "Итоги по условиям",
+  activity_by_super_class: "Активность по super_class", activity_by_cell_class: "Активность по cell_class",
+  activity_by_top_nt: "Активность по медиатору", top_neurons: "Самые активные нейроны",
+  top_delta_neurons: "Наибольшие изменения", readout: "Нейроны считывания", readout_neurons: "Нейроны считывания",
+  proxies: "Поведенческие прокси", behavioural_proxies: "Поведенческие прокси", model_facts: "Факты о модели",
+  stimulated: "Стимулированные", silenced: "Заглушённые", warning: "Предупреждение", warnings: "Предупреждения",
+  top_neurons_by_rate: "Самые активные нейроны (A)", top_neurons_by_delta: "Наибольшие изменения |Δ|",
+  readouts: "Нейроны считывания", references: "Литература", graph_units: "Единицы графа",
+  per_condition: "По условиям", unannotated_top_neurons: "Неаннотированные среди топа", rows: "Строки",
+  activity_by_cell_type: "Активность по cell_type", stimulated_neurons: "Стимулированные нейроны (каждый)",
+  silenced_neurons: "Заглушённые нейроны (каждый)", readout_inputs: "Активные входы нейронов считывания",
+  model_parameters: "Параметры модели", per_field: "Заполненность полей аннотации", field_warnings: "Предупреждения по полям",
+};
+function humanKey(k, lang) {
+  if (lang === "ru" && DIGEST_RU[k]) return DIGEST_RU[k];
+  const s = String(k).replace(/_/g, " ").trim();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+function fmtDigest(k, v, L) {
+  if (v === null || v === undefined) return "—";
+  if (typeof v === "boolean") return v ? L.yes : L.no;
+  if (typeof v === "number") {
+    if (!Number.isFinite(v)) return String(v);
+    // ids above 2^53 cannot round-trip through JSON numbers; they are shown exactly as parsed
+    if (Number.isInteger(v)) return Math.abs(v) >= 1e12 ? String(v) : v.toLocaleString("en-US");
+    const s = Math.abs(v) >= 100 ? v.toFixed(1) : Math.abs(v) >= 1 ? v.toFixed(2) : v.toPrecision(3);
+    return /share|fraction|frac|coverage|ratio/i.test(k) && v >= 0 && v <= 1 ? `${s} (${(v * 100).toFixed(1)}%)` : s;
+  }
+  if (Array.isArray(v)) return v.map((x) => fmtDigest(k, x, L)).join(v.every(isScalar) ? ", " : " ; ");
+  if (isPlainObj(v)) return Object.entries(v).map(([kk, vv]) => `${kk}: ${fmtDigest(kk, vv, L)}`).join(" · ");
+  return String(v);
+}
+// columns x_en / x_ru: only the one in the panel's language is shown
+function pickCols(cols, lang) {
+  return cols.filter((k) => {
+    const m = String(k).match(/^(.*)_(en|ru)$/);
+    if (!m) return true;
+    const other = `${m[1]}_${m[2] === "en" ? "ru" : "en"}`;
+    return !cols.includes(other) || m[2] === lang;
+  });
+}
+// A nested object of scalars becomes columns: annotation fields keep their own names (so a cell
+// type is a column you can filter by), others are prefixed with their parent (A_…, B_…).
+function flattenRow(r) {
+  const out = {};
+  for (const [k, v] of Object.entries(r)) {
+    if (isPlainObj(v) && Object.values(v).every(isScalar)) {
+      for (const [kk, vv] of Object.entries(v)) out[k === "annotation" && !(kk in r) ? kk : `${k}_${kk}`] = vv;
+    } else if (!(v === null && k === "annotation")) out[k] = v; // unannotated: its columns read "—"
+  }
+  return out;
+}
+function digestTable(rawRows, L) {
+  const rows = rawRows.map(flattenRow);
+  const all = [];
+  for (const r of rows.slice(0, 60)) for (const k of Object.keys(r)) if (!all.includes(k)) all.push(k);
+  const cols = pickCols(all, L.code);
+  const numeric = new Set(cols.filter((k) => rows.every((r) => r[k] === null || r[k] === undefined || typeof r[k] === "number") && rows.some((r) => typeof r[k] === "number" && Math.abs(r[k]) < 1e12)));
+  const idish = (k, v) => /(^|_)ids?$/.test(k) || (typeof v === "string" && /^\d{12,}$/.test(v)) || (typeof v === "number" && Math.abs(v) >= 1e12);
+  return h("div", { class: "table-wrap" }, h("table", { class: "ai-table" },
+    h("thead", null, h("tr", null, cols.map((k) => h("th", { scope: "col", class: numeric.has(k) ? "num" : null, text: humanKey(k, L.code) })))),
+    h("tbody", null, rows.map((r) => h("tr", null, cols.map((k) => h("td", {
+      class: [numeric.has(k) ? "num" : "", idish(k, r[k]) ? "mono" : ""].filter(Boolean).join(" ") || null,
+      text: fmtDigest(k, r[k], L),
+    })))))));
+}
+function digestBlock(key, val, L, depth) {
+  const head = h(depth ? "h5" : "h4", { class: "ai-d-h", text: humanKey(key, L.code) });
+  const sec = (...kids) => h("section", { class: "ai-d-sec", "data-depth": String(depth), "data-key": key }, head, ...kids);
+  if (Array.isArray(val)) {
+    if (!val.length) return sec(h("p", { class: "muted small", text: L.empty }));
+    if (val.every(isPlainObj)) return sec(digestTable(val, L));
+    if (val.every(isScalar)) {
+      return val.some((x) => String(x).length > 48)
+        ? sec(h("ul", { class: "ai-d-list" }, val.map((x) => h("li", { text: fmtDigest(key, x, L) }))))
+        : sec(h("ul", { class: "ai-d-list ai-d-chips" }, val.map((x) => h("li", { class: "tag mono", text: fmtDigest(key, x, L) }))));
+    }
+    return sec(h("pre", { class: "mono ai-d-pre", text: JSON.stringify(val, null, 2) }));
+  }
+  if (isPlainObj(val)) {
+    if (depth >= 3) return sec(h("pre", { class: "mono ai-d-pre", text: JSON.stringify(val, null, 2) }));
+    const entries = Object.entries(val).filter(([k]) => pickCols(Object.keys(val), L.code).includes(k));
+    const flat = entries.filter(([, v]) => isScalar(v) || (Array.isArray(v) && v.every(isScalar) && v.length <= 6));
+    const nested = entries.filter((e) => !flat.includes(e));
+    return sec(
+      flat.length ? h("dl", { class: "spec-grid compact ai-d-grid" }, flat.map(([k, v]) => h("div", { class: "spec" }, h("dt", { text: humanKey(k, L.code) }), h("dd", { class: typeof v === "number" ? "mono" : null, text: fmtDigest(k, v, L) })))) : null,
+      nested.map(([k, v]) => digestBlock(k, v, L, depth + 1)));
+  }
+  return sec(h("p", { text: fmtDigest(key, val, L) }));
+}
+function digestContent(dg, L) {
+  const keys = Object.keys(dg).filter((k) => k !== "digest_error");
+  const order = [...DIGEST_FIRST.filter((k) => keys.includes(k)), ...keys.filter((k) => !DIGEST_FIRST.includes(k))];
+  const top = order.filter((k) => isScalar(dg[k]));
+  return [
+    top.length ? h("section", { class: "ai-d-sec", "data-depth": "0" }, h("h4", { class: "ai-d-h", text: L.summary }),
+      h("dl", { class: "spec-grid compact ai-d-grid" }, top.map((k) => h("div", { class: "spec" }, h("dt", { text: humanKey(k, L.code) }), h("dd", { text: fmtDigest(k, dg[k], L) }))))) : null,
+    ...order.filter((k) => !isScalar(dg[k])).map((k) => digestBlock(k, dg[k], L, 0)),
+  ];
+}
+// Coverage warnings, wherever the digest carries them (coverage.warning is the documented place).
+function digestWarnings(dg) {
+  if (!isPlainObj(dg)) return [];
+  const out = [];
+  const add = (w, coverage) => {
+    if (typeof w === "string" && w.trim()) {
+      if (!out.some((o) => o.text === w.trim())) out.push({ text: w.trim(), coverage });
+    } else if (Array.isArray(w)) w.forEach((x) => add(x, coverage));
+  };
+  const cov = dg.coverage;
+  if (isPlainObj(cov)) { add(cov.warning, true); add(cov.warnings, true); add(cov.field_warnings, true); }
+  add(dg.coverage_warning, true);
+  add(dg.warnings, false); // the digest repeats the coverage warning here; it is shown once
+  return out;
+}
+
+/* "What the AI saw / will see": built when first opened; a filter narrows every table, and an
+   evidence chip opens it already filtered to that neuron or class. */
+function digestDetails(st, L, load, titleText) {
+  const det = h("details", { class: "ai-digest" });
+  if (st.digestOpen) det.open = true;
+  const body = h("div", { class: "ai-d-body" });
+  det.append(h("summary", null, h("span", { class: "ai-d-sum", text: titleText }), h("span", { class: "muted small", text: L.sawSub })), body);
+  let built = false, input = null, count = null, content = null;
+  const apply = () => {
+    if (!content) return;
+    const q = (st.filter || "").trim().toLowerCase();
+    let shown = 0, total = 0;
+    content.querySelectorAll("tbody tr, .ai-d-list li").forEach((row) => {
+      total++;
+      const on = !q || row.textContent.toLowerCase().includes(q);
+      row.hidden = !on;
+      row.classList.toggle("hit", Boolean(q) && on);
+      if (on) shown++;
+    });
+    content.querySelectorAll(".table-wrap").forEach((w) => { w.hidden = Boolean(q) && !w.querySelector("tbody tr:not([hidden])"); });
+    count.textContent = q ? L.rowsMatch(shown, total) : "";
+    content.querySelector(".ai-d-none").hidden = !(q && shown === 0);
+  };
+  const build = async () => {
+    if (built) return;
+    built = true;
+    body.replaceChildren(h("div", { class: "launching" }, h("span", { class: "spinner", "aria-hidden": "true" }), h("span", { text: L.digestLoading })));
+    let dg;
+    try {
+      dg = await load();
+      if (!isPlainObj(dg)) throw new ApiError(200, "BAD_SHAPE", "The digest is not an object");
+    } catch (err) {
+      built = false;
+      if (det.isConnected) body.replaceChildren(aiErrorBanner(L, err, [h("button", { class: "btn btn-sm", type: "button", text: L.retry, onclick: build })], L.digestErrTitle));
+      return;
+    }
+    if (!det.isConnected) return;
+    input = h("input", { class: "ai-d-input", type: "search", placeholder: L.filterPh, "aria-label": L.filter, value: st.filter || "" });
+    input.value = st.filter || "";
+    count = h("span", { class: "mono dim", "aria-live": "polite" });
+    input.addEventListener("input", () => { st.filter = input.value; apply(); });
+    const clear = h("button", { class: "btn btn-ghost btn-sm", type: "button", text: L.clear, onclick: () => { st.filter = ""; input.value = ""; apply(); input.focus(); } });
+    content = h("div", { class: "ai-d-content" }, h("p", { class: "muted small ai-d-none", hidden: true, text: L.noRows }), digestContent(dg, L));
+    body.replaceChildren(h("div", { class: "ai-d-filter" }, h("label", { class: "ai-d-flabel", text: L.filter }, input), clear, count), content);
+    apply();
+  };
+  det.addEventListener("toggle", () => { st.digestOpen = det.open; if (det.open) build(); });
+  if (det.open) build();
+  return {
+    el: det,
+    pick(token) {
+      st.filter = token;
+      if (input) { input.value = token; apply(); }
+      if (!det.open) det.open = true; // the toggle event builds it, with the filter applied
+      det.scrollIntoView({ behavior: isReduced() ? "auto" : "smooth", block: "start" });
+    },
+  };
+}
+
+/* ---------- loading plate (no interpretation yet) ---------- */
+function aiLoadingPlate(L, rec, uid) {
+  const elapsed = h("span", { class: "mono", "aria-hidden": "true" });
+  const note = h("p", { class: "ai-load-note", text: L.loadNote });
+  const cv = h("canvas", { class: "drafting-trace", "aria-hidden": "true" });
+  const bar = (cls) => h("div", { class: `skel ${cls}` });
+  const plate = h("div", { class: "ai-loading" },
+    h("p", { class: "sr-only", role: "status", text: L.loadSr }),
+    h("div", { class: "drafting-head" }, cv,
+      h("div", null,
+        h("p", { class: "drafting-title", text: L.loadTitle }),
+        h("p", { class: "drafting-sub" }, L.loadSub(aiModelName()), " · ", elapsed))),
+    h("div", { class: "ai-skel", "aria-hidden": "true" },
+      bar("ai-skel-head"), bar("ai-skel-line"), bar("ai-skel-line short"),
+      h("div", { class: "ai-skel-hyp" }, bar("ai-skel-line"), bar("ai-skel-line short")),
+      h("div", { class: "ai-skel-hyp" }, bar("ai-skel-line"), bar("ai-skel-line short"))),
+    note);
+  plate._start = () => {
+    trace(cv, { rows: 3, activity: 0.45, noise: 1.3, seed: hashString(`${uid}|ai`), colors: [COLORS.cyan, COLORS.green, COLORS.magenta] });
+    const tick = () => {
+      if (!plate.isConnected || aiStore.inflight.get(rec.jobId) !== rec) return;
+      const s = (performance.now() - rec.started) / 1000;
+      elapsed.textContent = `${Math.floor(s)} ${L.code === "ru" ? "с" : "s"}`;
+      if (s > 100 && note.textContent !== L.loadSlow) note.textContent = L.loadSlow;
+      later(tick, 500);
+    };
+    tick();
+  };
+  return plate;
+}
+
+/* ---------- the panel ---------- */
+function mountAiPanel(root, job, { autostart = false, scroll = false, onHas = null } = {}) {
+  const gen = routeGen;
+  const jobId = job.job_id;
+  const uid = hashString(jobId).toString(36);
+  const runLabel = job.title || job.prompt || planShort(job.plan) || jobId;
+  const st = {
+    lang: aiDefaultLang(job),
+    phase: "check", // check | check_error | empty | generating | result
+    data: null,
+    rec: null,
+    actionError: null,
+    checkError: null,
+    pendingStart: autostart,
+    pendingScroll: scroll,
+    filter: "",
+    digestOpen: false,
+    fresh: false,
+  };
+  const titleId = `ai-title-${uid}`;
+  const section = h("section", { class: "ai-panel", "aria-labelledby": titleId });
+  root.append(section);
+  const alive = () => gen === routeGen && section.isConnected;
+
+  function setData(d, fresh) {
+    st.data = d;
+    st.phase = "result";
+    st.fresh = fresh;
+    const ml = d.meta && d.meta.language;
+    if (ml === "ru" || ml === "en") st.lang = ml;
+    if (onHas) onHas(true, ml === "ru" || ml === "en" ? ml : null);
+  }
+
+  function attach(rec) {
+    st.rec = rec;
+    st.lang = rec.lang;
+    st.actionError = null;
+    st.phase = st.data ? "result" : "generating";
+    paint();
+    rec.promise.then((d) => {
+      if (!alive()) return;
+      st.rec = null;
+      setData(d, true);
+      paint();
+    }, (err) => {
+      if (!alive()) return;
+      st.rec = null;
+      st.actionError = err;
+      st.phase = st.data ? "result" : "empty";
+      paint();
+    });
+  }
+
+  function generate(regenerate) {
+    if (st.rec) return;
+    attach(aiRequest(jobId, st.lang, regenerate, runLabel));
+  }
+
+  async function check() {
+    st.phase = "check";
+    st.checkError = null;
+    paint();
+    const cached = aiStore.cache.get(jobId);
+    const running = aiStore.inflight.get(jobId);
+    if (running) { if (cached) setData(cached, false); attach(running); return; }
+    if (cached) { setData(cached, false); paint(); return; }
+    try {
+      const { data } = await api(`/api/v1/jobs/${encodeURIComponent(jobId)}/interpretation`);
+      if (!alive()) return;
+      checkInterpretation(data, "GET /interpretation");
+      aiStore.cache.set(jobId, data);
+      setData(data, false);
+      paint();
+    } catch (err) {
+      if (!alive()) return;
+      // a request started meanwhile (hero button) owns the panel now
+      if (st.rec) return;
+      if (err instanceof ApiError && err.status === 404 && err.code === "INTERPRETATION_NOT_FOUND") {
+        st.phase = "empty";
+        if (onHas) onHas(false);
+        if (aiStore.errors.has(jobId)) st.actionError = aiStore.errors.get(jobId);
+        if (st.pendingStart) { st.pendingStart = false; generate(false); return; }
+        paint();
+        return;
+      }
+      st.phase = "check_error";
+      st.checkError = err;
+      paint();
+    }
+  }
+
+  function langSeg(L) {
+    const btns = ["ru", "en"].map((l) => h("button", {
+      type: "button", role: "radio", "aria-checked": String(st.lang === l), "data-lang": l, lang: l,
+      text: l.toUpperCase(), title: l === "ru" ? "Русский" : "English", disabled: st.rec ? true : null,
+    }));
+    const seg = h("div", { class: "seg seg-sm", role: "radiogroup", "aria-label": L.langLabel }, btns);
+    seg.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-lang]");
+      if (!b || st.rec || b.dataset.lang === st.lang) return;
+      st.lang = b.dataset.lang;
+      state.aiLang = st.lang;
+      paint();
+      const again = section.querySelector(`.ai-tools [data-lang="${st.lang}"]`);
+      if (again) again.focus();
+    });
+    requestAnimationFrame(() => segIndicator(seg));
+    return seg;
+  }
+
+  function result(L) {
+    const d = st.data;
+    const it = d.interpretation;
+    const digest = isPlainObj(d.digest) ? d.digest : null;
+    const warnings = normWarnings(d.evidence_warnings);
+    let dd = null;
+    const ctx = { uid, warnings, canPick: Boolean(digest), pick: (t) => dd && dd.pick(t) };
+    const digestErr = d.digest_error || (digest && digest.digest_error) || null;
+    const obs = Array.isArray(it.observations) ? it.observations : [];
+    const hyps = it.hypotheses;
+    const lims = Array.isArray(it.limitations) ? it.limitations.filter(Boolean) : [];
+    const reading = Array.isArray(it.suggested_reading) ? it.suggested_reading.filter(Boolean) : [];
+    let evBanner = null;
+    if (warnings.length) {
+      evBanner = banner("warn", L.evWarnTitle, L.evWarnBody, { meta: "evidence_warnings" });
+      evBanner.children[1].append(h("ul", { class: "ai-warn-list" }, warnings.map((w) => h("li", null,
+        w.location ? h("b", { text: `${warnLoc(w.location, L)}: ` }) : null, w.message))));
+    }
+    if (digest) dd = digestDetails(st, L, () => Promise.resolve(digest), L.saw);
+    const content = h("div", { class: `ai-content${st.rec ? " busy" : ""}` },
+      digestErr ? banner("error", L.digestErrTitle, String(digestErr), { meta: "digest_error" }) : null,
+      digestWarnings(digest).map((w) => banner("warn", w.coverage ? L.coverageTitle : L.digestWarnTitle, w.text, { meta: w.coverage ? "coverage.warning" : "digest warnings" })),
+      evBanner,
+      it.headline ? h("div", { class: "ai-headline-wrap" }, h("p", { class: "hyp-label", text: L.headline }), h("blockquote", { class: "ai-headline", text: it.headline })) : null,
+      obs.length ? h("section", { class: "ai-sec" },
+        h("div", { class: "ai-sec-head" }, h("h3", { class: "ai-sec-title", text: L.observations }), h("p", { class: "ai-sec-sub", text: L.obsSub })),
+        h("ul", { class: "ai-obs" }, obs.map((o, i) => h("li", null,
+          h("p", { text: typeof o === "string" ? o : (o && o.text) || "" }),
+          o && typeof o === "object" ? evChips(o.evidence, L, ctx, `observations[${i}].evidence`) : null)))) : null,
+      h("section", { class: "ai-sec" },
+        h("div", { class: "ai-sec-head" }, h("h3", { class: "ai-sec-title", text: L.hypotheses }), h("p", { class: "ai-sec-sub", text: L.hypSub })),
+        hyps.length ? h("div", { class: "hyps" }, hyps.map((hy, i) => hypCard(hy || {}, i, L, ctx))) : h("p", { class: "muted", text: L.noHyp })),
+      lims.length ? h("section", { class: "ai-sec ai-sec-small" }, h("h3", { class: "ai-sec-title", text: L.limitations }), h("ul", { class: "ai-lims" }, lims.map((x) => h("li", { text: x })))) : null,
+      reading.length ? h("section", { class: "ai-sec ai-sec-small" }, h("h3", { class: "ai-sec-title", text: L.reading }), h("ul", { class: "ai-reading" }, it.suggested_reading.map((x, i) => {
+        if (!x) return null;
+        const ws = warnsAt(ctx, `suggested_reading[${i}]`);
+        return h("li", { class: ws.length ? "flagged" : null }, h("span", { text: x }), ws.length ? h("span", { class: "ev-flag", text: ws.map((w) => w.message).join("; ") }) : null);
+      }))) : null,
+      dd ? dd.el : banner("warn", L.saw, L.noDigest));
+    if (st.rec) content.inert = true;
+    // Claude's text is in the language it was generated in, whatever the labels are set to
+    const dl = d.meta && d.meta.language;
+    if (dl === "ru" || dl === "en") content.setAttribute("lang", dl);
+    return content;
+  }
+
+  function footer(L) {
+    const m = (st.data && st.data.meta) || {};
+    const bits = [];
+    if (m.model) bits.push(h("span", null, m.model));
+    if (typeof m.cost_usd === "number") bits.push(h("span", null, `$${m.cost_usd.toFixed(3)}`));
+    if (typeof m.duration_ms === "number") bits.push(h("span", null, `${(m.duration_ms / 1000).toFixed(1)} ${L.code === "ru" ? "с" : "s"}`));
+    if (m.created_at) bits.push(h("span", { title: absTime(m.created_at) }, aiRelTime(m.created_at, L.code)));
+    if (m.language) bits.push(h("span", null, `${L.foot.lang} ${String(m.language).toUpperCase()}`));
+    if (typeof m.cached === "boolean") bits.push(h("span", null, m.cached ? L.foot.cached : L.foot.fresh));
+    return bits.length ? h("footer", { class: "ai-foot mono" }, bits) : null;
+  }
+
+  function paint() {
+    if (!alive()) return;
+    const L = aiT(st.lang);
+    const busy = Boolean(st.rec) || st.phase === "check";
+    section.setAttribute("lang", L.code);
+    section.setAttribute("aria-busy", String(busy));
+    section.classList.toggle("arrive", st.fresh && !isReduced());
+    const d = st.data;
+    const regenBtn = st.phase === "result" ? h("button", {
+      class: "btn btn-sm ai-regen", type: "button", disabled: st.rec ? true : null,
+      text: d && d.meta && d.meta.language && d.meta.language !== st.lang ? L.regenerateIn : L.regenerate,
+      onclick: () => generate(true),
+    }) : null;
+    const head = h("header", { class: "ai-head" },
+      h("div", null,
+        h("p", { class: "eyebrow ai-eyebrow" }, h("span", { class: "ai-glyph", "aria-hidden": "true" }), L.eyebrow),
+        h("h2", { class: "display ai-title", id: titleId, tabindex: "-1", text: L.title })),
+      h("div", { class: "ai-tools" }, langSeg(L), regenBtn));
+    const parts = [head, aiStamp(L, d ? d.disclaimer : undefined), aiLegend(L)];
+    // After INTERPRETATION_CORRUPT or DIGEST_ERROR the retry sends regenerate:true, the only
+    // request the server recovers from.
+    const regenAfter = (err) => Boolean(st.data) || aiNeedsRegen(err);
+    const retryGen = (err) => h("button", { class: "btn btn-sm", type: "button", text: aiNeedsRegen(err) && !st.data ? L.rebuild : L.retry, onclick: () => generate(regenAfter(err)) });
+    if (st.actionError) parts.push(aiErrorBanner(L, st.actionError, [retryGen(st.actionError)]));
+    if (st.phase === "check") {
+      parts.push(h("div", { class: "launching" }, h("span", { class: "spinner", "aria-hidden": "true" }), h("span", { text: L.checking })));
+    } else if (st.phase === "check_error") {
+      parts.push(aiErrorBanner(L, st.checkError, [
+        h("button", { class: "btn btn-sm", type: "button", text: L.retry, onclick: check }),
+        h("button", { class: "btn btn-sm btn-ghost", type: "button", text: aiNeedsRegen(st.checkError) ? L.replaceCorrupt : L.generateAnyway, onclick: () => generate(aiNeedsRegen(st.checkError)) }),
+      ], st.checkError && st.checkError.code && L.err[st.checkError.code] ? null : L.err.check));
+    } else if (st.phase === "empty") {
+      const model = aiModelName();
+      const gen2 = h("button", { class: "btn btn-primary ai-gen", type: "button", onclick: () => generate(aiNeedsRegen(st.actionError)) },
+        h("span", { class: "ai-glyph", "aria-hidden": "true" }), h("span", { text: L.generate }),
+        model ? h("span", { class: "ai-model mono", text: model }) : null);
+      parts.push(h("div", { class: "ai-empty" }, h("p", { class: "ai-intro", text: L.intro }), h("div", { class: "ai-actions" }, gen2)));
+      parts.push(digestDetails(st, L, () => fetchDigest(jobId), L.willSee).el);
+    } else if (st.phase === "generating") {
+      parts.push(aiLoadingPlate(L, st.rec, uid));
+    } else if (st.phase === "result") {
+      if (st.rec) {
+        const cv = h("canvas", { class: "ai-regen-trace", "aria-hidden": "true" });
+        const strip = h("div", { class: "ai-regen-strip", role: "status" }, cv,
+          h("div", null, h("p", { class: "drafting-title", text: L.regenerating(st.rec.lang) }), h("p", { class: "drafting-sub", text: L.regenNote })));
+        strip._start = () => trace(cv, { rows: 2, activity: 0.5, seed: hashString(`${uid}|regen`), colors: [COLORS.cyan, COLORS.magenta] });
+        parts.push(strip);
+      }
+      parts.push(result(L));
+      parts.push(footer(L));
+    }
+    section.replaceChildren(...parts.filter(Boolean));
+    section.querySelectorAll(".ai-loading, .ai-regen-strip").forEach((el) => el._start && el._start());
+    if (st.fresh) { st.fresh = false; arrive(); }
+    if (st.pendingScroll && st.phase !== "check") {
+      st.pendingScroll = false;
+      requestAnimationFrame(() => api_.reveal());
+    }
+  }
+
+  // Results arrive in reading order: headline, observations, then the hypothesis cards; the
+  // confidence ticks light up per card (CSS, under .arrive).
+  function arrive() {
+    if (isReduced()) return;
+    const parts = [...section.querySelectorAll(".ai-content > .banner, .ai-headline-wrap, .ai-obs > li, .hyp, .ai-sec-small, .ai-digest, .ai-foot")];
+    stagger(parts, { step: 60, max: 14, y: 12, duration: DUR.enter });
+  }
+
+  const api_ = {
+    start() {
+      if (st.rec || st.phase === "result" || st.phase === "generating") return;
+      if (st.phase === "check") { st.pendingStart = true; return; }
+      generate(false);
+    },
+    reveal() {
+      section.scrollIntoView({ behavior: isReduced() ? "auto" : "smooth", block: "start" });
+      const t = section.querySelector(`#${titleId}`);
+      if (t) t.focus({ preventScroll: true });
+    },
+  };
+  check();
+  return api_;
+}
+
+function aiRelTime(iso, lang) {
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return String(iso);
+  const f = new Intl.RelativeTimeFormat(lang === "ru" ? "ru" : "en", { numeric: "auto" });
+  const s = (t - Date.now()) / 1000;
+  const a = Math.abs(s);
+  if (a < 60) return f.format(0, "minute");
+  if (a < 3600) return f.format(Math.round(s / 60), "minute");
+  if (a < 86400) return f.format(Math.round(s / 3600), "hour");
+  return f.format(Math.round(s / 86400), "day");
+}
+
+/* ---------- composer: after a successful run ---------- */
+function aiCta(slot, job) {
+  const L = aiT(aiDefaultLang(job));
+  const btn = h("button", { class: "btn btn-primary ai-cta-btn", type: "button" }, h("span", { class: "ai-glyph", "aria-hidden": "true" }), h("span", { text: L.cta }));
+  const cta = h("div", { class: "ai-cta", lang: L.code },
+    h("div", null, h("p", { class: "ai-cta-title", text: L.cta }), h("p", { class: "ai-cta-sub", text: L.ctaSub })),
+    btn);
+  btn.addEventListener("click", () => {
+    slot.replaceChildren();
+    const p = mountAiPanel(slot, job, { autostart: true });
+    enter(slot.firstChild, { y: 14, duration: DUR.enter });
+    p.reveal();
+  });
+  slot.replaceChildren(cta);
+  enter(cta, { y: 12, duration: DUR.enter, delay: isReduced() ? 0 : 900 });
+}
+
+/* ---------- Library cards: interpret in place, then "View hypotheses" ---------- */
+// A run with hypotheses is labelled in their language (this session's result, else the stored
+// language from history); a run without uses the default language.
+function cardLang(job) {
+  const cached = aiStore.cache.get(job.job_id);
+  const ml = cached && cached.meta && cached.meta.language;
+  if (ml === "ru" || ml === "en") return ml;
+  if (job.has_interpretation === true && (job.interpretation_language === "ru" || job.interpretation_language === "en")) return job.interpretation_language;
+  return aiDefaultLang(job);
+}
+function cardAi(job, thumbTop, label) {
+  if (job.status !== "succeeded") return null;
+  const jobId = job.job_id;
+  const box = h("div", { class: "card-ai" });
+  const href = `#/job/${encodeURIComponent(jobId)}?ai=1`;
+  let marker = null;
+  const mark = (on, isNew, L) => {
+    if (!on || marker) return;
+    marker = h("span", { class: `ai-mark${isNew ? " new" : ""}`, title: L.markTitle, text: "AI" });
+    thumbTop.append(marker);
+  };
+  function paint(isNew = false) {
+    const lang = cardLang(job);
+    const L = aiT(lang);
+    box.setAttribute("lang", L.code);
+    const rec = aiStore.inflight.get(jobId);
+    const has = job.has_interpretation === true || aiStore.cache.has(jobId);
+    mark(has, isNew, L);
+    if (rec) {
+      const secs = h("span", { class: "mono dim", "aria-hidden": "true" });
+      box.replaceChildren(h("div", { class: "card-ai-busy" },
+        h("span", { class: "spinner", "aria-hidden": "true" }),
+        h("span", { role: "status", text: `${L.interpreting}…` }), secs));
+      const tick = () => {
+        if (aiStore.inflight.get(jobId) !== rec) return;
+        secs.textContent = `${Math.floor((performance.now() - rec.started) / 1000)} ${L.code === "ru" ? "с" : "s"}`;
+        if (box.isConnected || !box.parentNode) later(tick, 1000);
+      };
+      tick();
+      rec.promise.then(() => { if (box.isConnected) paint(true); }, () => { if (box.isConnected) paint(); });
+      return;
+    }
+    if (has) {
+      box.replaceChildren(h("a", { class: "card-ai-link", href }, h("span", { class: "ai-glyph", "aria-hidden": "true" }), h("span", { text: L.viewHyp }), h("span", { class: "arrow", "aria-hidden": "true", text: "→" })));
+      if (isNew) enter(box.firstChild, { y: 6, duration: DUR.view });
+      return;
+    }
+    // The server runs one interpretation per account at a time: while another run's is in
+    // flight this card waits (and repaints when that one settles) instead of failing with 429.
+    const other = [...aiStore.inflight.values()].find((r) => r.jobId !== jobId);
+    if (other) {
+      box.replaceChildren(h("div", { class: "card-ai-wait" },
+        h("button", { class: "btn btn-sm card-ai-btn", type: "button", disabled: true, "aria-describedby": `wait-${hashString(jobId).toString(36)}` },
+          h("span", { class: "ai-glyph", "aria-hidden": "true" }), h("span", { text: L.interpret })),
+        h("p", { class: "card-ai-note", id: `wait-${hashString(jobId).toString(36)}`, text: L.waitingFor(other.label) })));
+      other.promise.then(() => { if (box.isConnected) paint(); }, () => { if (box.isConnected) paint(); });
+      return;
+    }
+    const err = aiStore.errors.get(jobId);
+    const regen = aiNeedsRegen(err);
+    const btn = h("button", { class: "btn btn-sm card-ai-btn", type: "button", "aria-label": `${L.interpret}: ${label}` },
+      h("span", { class: "ai-glyph", "aria-hidden": "true" }), h("span", { text: regen ? L.rebuild : err ? L.retry : L.interpret }));
+    btn.addEventListener("click", () => {
+      aiRequest(jobId, lang, regen, label);
+      // every card on the page repaints: this one shows progress, the others wait
+      document.querySelectorAll(".card-ai").forEach((b) => b !== box && b._paint && b._paint());
+      paint();
+    });
+    const note = err ? aiRetryNote(L, err) : null;
+    // replaceChildren() would print a null child as the text "null": only pass real nodes
+    box.replaceChildren(...[
+      err ? h("p", { class: "card-ai-err", role: "alert" },
+        h("b", { text: aiErrTitle(L, err) }), " ",
+        err.message || String(err),
+        note ? ` ${note}` : "",
+        errorMeta(err) ? h("span", { class: "mono card-ai-meta", text: errorMeta(err) }) : null) : null,
+      btn].filter(Boolean));
+  }
+  box._paint = () => paint();
+  paint();
+  return box;
 }
 
 /* ================================================================== */

@@ -8,6 +8,9 @@ prompt=$(cat)
 if [ -n "$FAKE_CLAUDE_LOG" ]; then
   printf 'STDIN:%s\n' "$prompt" >> "$FAKE_CLAUDE_LOG"
 fi
+if [ -n "$FAKE_CLAUDE_DELAY" ]; then
+  sleep "$FAKE_CLAUDE_DELAY"
+fi
 
 ok_envelope() {
   printf '{"type":"result","subtype":"success","is_error":false,"duration_ms":1234,"total_cost_usd":0.0123,"result":"","structured_output":%s}\n' "$1"
@@ -44,6 +47,10 @@ case "${FAKE_CLAUDE_MODE:-ready_single}" in
     ;;
   invalid_plan)
     ok_envelope '{"status":"ready","message":"Run 5 seconds.","unresolved_fields":[],"plan":{"experiment_type":"single","activation":[{"group_id":"sugar_grn","rate_hz":50}],"silencing":[],"readout":[{"group_id":"mn9"}],"duration_ms":5000,"repeats":1,"base_seed":42}}'
+    ;;
+  from_file)
+    # Interpretation tests: structured_output is the JSON in FAKE_CLAUDE_OUTPUT_FILE.
+    ok_envelope "$(cat "$FAKE_CLAUDE_OUTPUT_FILE")"
     ;;
   garbage)
     printf 'Segmentation fault\n'

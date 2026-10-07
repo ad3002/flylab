@@ -32,7 +32,7 @@ v=eval(sys.argv[2])
 print(v if not isinstance(v,(dict,list)) else json.dumps(v))' "$1" "$2"
 }
 
-echo "[1/7] Starting FlyLab server on 127.0.0.1:$PORT..."
+echo "[1/8] Starting FlyLab server on 127.0.0.1:$PORT..."
 HOST=127.0.0.1 PORT="$PORT" DB_PATH="$DB_PATH" ARTIFACTS_DIR="$ARTIFACTS_DIR" REGISTRATION_OPEN=true \
     "$ROOT_DIR/bin/flylab" > "$TEMP_DIR/server.log" 2>&1 &
 SERVER_PID=$!
@@ -54,7 +54,7 @@ if [[ "$READY" -ne 1 ]]; then
 fi
 echo "FlyLab server is healthy and responding."
 
-echo "[2/7] Registering a throwaway user and checking auth..."
+echo "[2/8] Registering a throwaway user and checking auth..."
 SMOKE_USER="smoke_$(date +%s)_$RANDOM"
 SMOKE_PASS="smoke-pass-$RANDOM$RANDOM"
 REG_RESP=$(curl -s -X POST "$BASE/api/v1/auth/register" -H "Content-Type: application/json" \
@@ -84,7 +84,7 @@ if [[ "$ME_USER" != "$SMOKE_USER" ]]; then
 fi
 echo "Registered $SMOKE_USER; Bearer auth works, anonymous access and text/plain POSTs are rejected."
 
-echo "[3/7] Validating experiment plan (Sugar GRN 50 Hz vs Demo Silencing)..."
+echo "[3/8] Validating experiment plan (Sugar GRN 50 Hz vs Demo Silencing)..."
 PLAN_FILE="$ROOT_DIR/contracts/fixtures/valid_compare.json"
 VAL_RESP=$(curl -s -X POST "$BASE/api/v1/plans/validate" \
     -H "Content-Type: application/json" \
@@ -97,7 +97,7 @@ if [[ -z "$PLAN_ID" ]]; then
 fi
 echo "Plan validated successfully: $PLAN_ID"
 
-echo "[4/7] Submitting job with Idempotency-Key..."
+echo "[4/8] Submitting job with Idempotency-Key..."
 JOB_RESP=$(curl -s -X POST "$BASE/api/v1/jobs" "${AUTH[@]}" \
     -H "Content-Type: application/json" \
     -H "Idempotency-Key: smoke-idemp-001" \
@@ -110,7 +110,7 @@ if [[ -z "$JOB_ID" ]]; then
 fi
 echo "Job created and queued: $JOB_ID"
 
-echo "[5/7] Polling job execution status..."
+echo "[5/8] Polling job execution status..."
 SUCCEEDED=0
 for i in {1..30}; do
     STATUS_RESP=$(curl -s "${AUTH[@]}" "$BASE/api/v1/jobs/$JOB_ID")
@@ -134,7 +134,7 @@ if [[ "$SUCCEEDED" -ne 1 ]]; then
 fi
 echo "Job completed successfully!"
 
-echo "[6/7] Verifying experiment results, history and scientific outputs..."
+echo "[6/8] Verifying experiment results, history and scientific outputs..."
 RESULTS=$(curl -s "${AUTH[@]}" "$BASE/api/v1/jobs/$JOB_ID/results")
 echo "$RESULTS" | grep -q '"total_spikes_A":267' || {
     echo "Error: total_spikes_A != 267. Results: $RESULTS" >&2
@@ -154,7 +154,56 @@ if [[ "$H_SPIKES" != "267" || "$H_ERR" != "None" ]]; then
 fi
 echo "Scientific validation passed: Baseline=267 spikes, Silenced=266 spikes; history shows the summary."
 
-echo "[7/7] Downloading archive export and testing offline replay..."
+echo "[7/8] Deterministic interpretation digest (flysim digest, annotations, coverage)..."
+NO_INTERP_BODY="$TEMP_DIR/no_interp.json"
+NO_INTERP_CODE=$(curl -s -o "$NO_INTERP_BODY" -w '%{http_code}' "${AUTH[@]}" "$BASE/api/v1/jobs/$JOB_ID/interpretation")
+NO_INTERP_ERR=$(json_get "$(cat "$NO_INTERP_BODY")" 'd["error"]["code"]') || NO_INTERP_ERR="(not a JSON error envelope)"
+if [[ "$NO_INTERP_CODE" != "404" || "$NO_INTERP_ERR" != "INTERPRETATION_NOT_FOUND" ]]; then
+    echo "Error: GET interpretation before any returned $NO_INTERP_CODE/$NO_INTERP_ERR: $(cat "$NO_INTERP_BODY")" >&2
+    exit 1
+fi
+DIGEST_BODY="$TEMP_DIR/digest.json"
+DIGEST_CODE=$(curl -s -o "$DIGEST_BODY" -w '%{http_code}' "${AUTH[@]}" "$BASE/api/v1/jobs/$JOB_ID/digest")
+if [[ "$DIGEST_CODE" != "200" ]]; then
+    echo "Error: GET digest returned $DIGEST_CODE: $(cat "$DIGEST_BODY")" >&2
+    exit 1
+fi
+DIGEST=$(cat "$DIGEST_BODY")
+D_A=$(json_get "$DIGEST" 'd["digest"]["totals"]["A"]["spikes"]')
+D_B=$(json_get "$DIGEST" 'd["digest"]["totals"]["B"]["spikes"]')
+D_READOUT_HOPS=$(json_get "$DIGEST" '[r["hops_from_stimulated"] for r in d["digest"]["readouts"]]')
+D_ANN=$(json_get "$DIGEST" 'd["digest"]["coverage"]["annotations_ready"]')
+D_COV=$(json_get "$DIGEST" 'd["digest"]["coverage"]["active_annotated_share"]')
+D_STIM=$(json_get "$DIGEST" 'd["digest"]["experiment"]["stimulated"][0]["group_id"]')
+if [[ "$D_A" != "267" || "$D_B" != "266" || "$D_STIM" != "sugar_grn" ]]; then
+    echo "Error: digest totals/groups wrong (A=$D_A B=$D_B stimulated=$D_STIM): $DIGEST" >&2
+    exit 1
+fi
+# v3 digest content an expert's hypotheses need: per-neuron stimulated table, network-only top
+# list, readout inputs from the real graph, the simulator's parameters.
+D_SHAPE=$(json_get "$DIGEST" '[d["digest"]["schema_version"], len(d["digest"]["stimulated_neurons"]), any("stimulated" in n["roles"] for n in d["digest"]["top_neurons_by_rate"]), all(r["presynaptic_partners"] > 0 for r in d["digest"]["readouts"]), len(d["digest"]["readout_inputs"]) > 0, d["digest"]["model_parameters"]["max_rate_hz_bound"]]')
+if [[ "$D_SHAPE" != '["1.1", 21, false, true, true, 454.5]' ]]; then
+    echo "Error: digest shape wrong [schema, stimulated rows, stimulated in top, readouts have inputs, readout_inputs listed, max rate]: $D_SHAPE" >&2
+    exit 1
+fi
+if [[ ! -f "$ARTIFACTS_DIR/$JOB_ID/digest_graph.json" ]]; then
+    echo "Error: digest_graph.json was not cached in the run's artifact directory" >&2
+    exit 1
+fi
+if [[ -f "$ROOT_DIR/data/annotations_630.tsv" && "$D_ANN" != "True" ]]; then
+    echo "Error: data/annotations_630.tsv is installed but the digest reports annotations_ready=$D_ANN" >&2
+    exit 1
+fi
+echo "Digest: A=$D_A B=$D_B spikes, readout hops from stimulated $D_READOUT_HOPS, annotations_ready=$D_ANN, annotated share of active neurons $D_COV."
+if [[ "${SMOKE_INTERPRET:-0}" == "1" ]]; then
+    # Opt-in: one real (paid) claude -p interpretation.
+    INTERP=$(curl -s -X POST "${AUTH[@]}" -H "Content-Type: application/json" -d '{"language":"en"}' \
+        "$BASE/api/v1/jobs/$JOB_ID/interpretation")
+    I_H=$(json_get "$INTERP" 'd["interpretation"]["headline"]') || { echo "Error: interpretation failed: $INTERP" >&2; exit 1; }
+    echo "Interpretation headline: $I_H"
+fi
+
+echo "[8/8] Downloading archive export and testing offline replay..."
 EXPORT_ZIP="$TEMP_DIR/export.zip"
 curl -sf "${AUTH[@]}" "$BASE/api/v1/jobs/$JOB_ID/export" -o "$EXPORT_ZIP"
 

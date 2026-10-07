@@ -3,9 +3,10 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
+use arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
@@ -76,6 +77,50 @@ pub fn save_spikes_parquet(
     writer.close()?;
 
     Ok(())
+}
+
+/// Reads a spikes.parquet written by `save_spikes_parquet`. A missing column, a wrong column
+/// type, a null value or a negative trial is an error naming the problem (never skipped).
+pub fn load_spikes_parquet(path: &Path) -> Result<Vec<OutputSpike>, Box<dyn std::error::Error>> {
+    let file = File::open(path)?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+    let mut spikes = Vec::new();
+    for batch in reader {
+        let batch = batch?;
+        let col = |name: &str| batch.column_by_name(name).ok_or_else(|| format!("spikes parquet lacks column {name}"));
+        let cond = col("condition")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or("spikes parquet column condition is not a string column")?;
+        let trial = col("trial")?
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or("spikes parquet column trial is not an int64 column")?;
+        let root = col("root_id")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or("spikes parquet column root_id is not a string column")?;
+        let time = col("spike_time_ms")?
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .ok_or("spikes parquet column spike_time_ms is not a float64 column")?;
+        for i in 0..batch.num_rows() {
+            if cond.is_null(i) || trial.is_null(i) || root.is_null(i) || time.is_null(i) {
+                return Err(format!("spikes parquet row {} has a null value", spikes.len()).into());
+            }
+            let t = trial.value(i);
+            if t < 0 {
+                return Err(format!("spikes parquet row {} has a negative trial ({t})", spikes.len()).into());
+            }
+            spikes.push(OutputSpike {
+                condition: cond.value(i).to_string(),
+                trial: t as usize,
+                root_id: root.value(i).to_string(),
+                spike_time_ms: time.value(i),
+            });
+        }
+    }
+    Ok(spikes)
 }
 
 pub fn save_rates_csv(

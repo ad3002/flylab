@@ -14,6 +14,7 @@ import (
 	"github.com/ad3002/flylab/internal/cli"
 	"github.com/ad3002/flylab/internal/config"
 	"github.com/ad3002/flylab/internal/contracts"
+	"github.com/ad3002/flylab/internal/interpret"
 	"github.com/ad3002/flylab/internal/llm"
 	"github.com/ad3002/flylab/internal/storage"
 	"github.com/ad3002/flylab/internal/worker"
@@ -103,6 +104,17 @@ func serve() {
 		log.Printf("WARNING: claude CLI %q not found; /plans/parse will use the keyword parser and report llm_error", cfg.ClaudeBin)
 	}
 
+	// v3 interpretation: annotations (optional data file) + readout proxies (registry).
+	interpreter, err := interpret.NewService(cfg, store, registry, validator, llmClient)
+	if err != nil {
+		log.Fatalf("Failed to initialise the interpretation service: %v", err)
+	}
+	if ann := interpreter.Annotations(); ann.Ready {
+		log.Printf("Neuron annotations: %d neurons from %s", ann.Count(), ann.Path)
+	} else {
+		log.Printf("WARNING: %s not found; capabilities report annotations_ready=false and every digest carries a coverage warning (run scripts/setup_data.sh)", ann.Path)
+	}
+
 	// Initialize and start background worker
 	w := worker.NewWorker(cfg, store)
 	if err := w.Start(); err != nil {
@@ -115,12 +127,15 @@ func serve() {
 	// Create API and Web Server
 	srv := api.NewServer(cfg, store, validator, registry, llmClient)
 	srv.SetWorker(w)
+	srv.SetInterpreter(interpreter)
 
 	httpServer := &http.Server{
-		Addr:         fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Handler:      srv.Router(),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 300 * time.Second,
+		Addr:        fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Handler:     srv.Router(),
+		ReadTimeout: 30 * time.Second,
+		// An interpretation may wait for the digest slot, run flysim digest, wait for a Claude
+		// slot and run Claude (interpret.WorstCase): keep the write deadline above that.
+		WriteTimeout: interpret.WorstCase(cfg) + 60*time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 

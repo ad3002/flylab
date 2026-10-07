@@ -1,0 +1,8 @@
+{
+  "experiment_type": "single",
+  "active_neurons_count_A": 3,
+  "active_neurons_count_B": 0,
+  "total_spikes_A": 19,
+  "total_spikes_B": null,
+  "readout_summary": []
+}

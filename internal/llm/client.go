@@ -339,26 +339,74 @@ type claudeEnvelope struct {
 
 // Args returns the exact argument list passed to the CLI (the prompt itself goes to stdin).
 func (c *Client) Args() []string {
+	return argsFor(c.cfg.ClaudeModel, c.systemPrompt, c.plannerSchema)
+}
+
+func argsFor(model, systemPrompt, schema string) []string {
 	return []string{
 		"-p",
-		"--model", c.cfg.ClaudeModel,
+		"--model", model,
 		"--tools", "",
 		"--no-session-persistence",
 		"--strict-mcp-config",
 		"--setting-sources", "",
 		"--output-format", "json",
-		"--system-prompt", c.systemPrompt,
-		"--json-schema", c.plannerSchema,
+		"--system-prompt", systemPrompt,
+		"--json-schema", schema,
 	}
 }
 
-func (c *Client) runClaude(parent context.Context, bin, prompt string) (*plannerOutput, map[string]interface{}, error) {
-	timeout := time.Duration(c.cfg.ClaudeTimeoutSeconds) * time.Second
-	ctx, cancel := context.WithTimeout(parent, timeout)
+// StructuredCall is one `claude -p` invocation with a JSON schema. The planner and the
+// interpreter use the same flags; Stdin carries the user message (never argv).
+type StructuredCall struct {
+	Model        string
+	SystemPrompt string
+	Schema       string
+	Stdin        string
+	Timeout      time.Duration
+	// OnSlot, when set, runs once a concurrency slot is held and before claude starts; an
+	// error from it releases the slot and is returned as is (claude never runs). The
+	// interpreter records its rate-limit windows here, so a busy slot costs no quota.
+	OnSlot func() error
+}
+
+// StructuredResult is the structured_output of a successful call plus its metadata.
+type StructuredResult struct {
+	Output     json.RawMessage
+	CostUSD    float64
+	DurationMS int64
+	Wall       time.Duration
+}
+
+// RunStructured runs one call on the planner's shared concurrency slots (LLM_MAX_CONCURRENCY).
+// There is no heuristic fallback here: a missing or broken CLI, a failed or timed-out run, an
+// is_error envelope or a missing structured_output is an *Error; no slot in time is ErrBusy.
+func (c *Client) RunStructured(ctx context.Context, call StructuredCall) (*StructuredResult, error) {
+	bin, missing, err := resolveClaude(c.cfg.ClaudeBin)
+	if missing {
+		return nil, &Error{Reason: fmt.Sprintf("claude CLI not found: %v", err)}
+	}
+	if err != nil {
+		return nil, &Error{Reason: fmt.Sprintf("claude CLI is not usable: %v", err)}
+	}
+	if err := c.acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer func() { <-c.sem }()
+	if call.OnSlot != nil {
+		if err := call.OnSlot(); err != nil {
+			return nil, err
+		}
+	}
+	return c.invoke(ctx, bin, call)
+}
+
+func (c *Client) invoke(parent context.Context, bin string, call StructuredCall) (*StructuredResult, error) {
+	ctx, cancel := context.WithTimeout(parent, call.Timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, bin, c.Args()...)
-	cmd.Stdin = strings.NewReader(prompt)
+	cmd := exec.CommandContext(ctx, bin, argsFor(call.Model, call.SystemPrompt, call.Schema)...)
+	cmd.Stdin = strings.NewReader(call.Stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -369,11 +417,11 @@ func (c *Client) runClaude(parent context.Context, bin, prompt string) (*planner
 	wall := time.Since(start)
 
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) && parent.Err() == nil {
-		return nil, nil, &Error{Reason: fmt.Sprintf("claude CLI timed out after %d s%s",
-			c.cfg.ClaudeTimeoutSeconds, stderrSuffix(stderr.String()))}
+		return nil, &Error{Reason: fmt.Sprintf("claude CLI timed out after %d s%s",
+			int(call.Timeout.Seconds()), stderrSuffix(stderr.String()))}
 	}
 	if parent.Err() != nil {
-		return nil, nil, &Error{Reason: fmt.Sprintf("request cancelled while claude was running: %v", parent.Err())}
+		return nil, &Error{Reason: fmt.Sprintf("request cancelled while claude was running: %v", parent.Err())}
 	}
 
 	var env claudeEnvelope
@@ -381,71 +429,84 @@ func (c *Client) runClaude(parent context.Context, bin, prompt string) (*planner
 
 	if runErr != nil {
 		if envErr == nil && env.IsError {
-			return nil, nil, &Error{Reason: fmt.Sprintf("claude reported an error (subtype=%s, %v): %s",
+			return nil, &Error{Reason: fmt.Sprintf("claude reported an error (subtype=%s, %v): %s",
 				orNone(env.Subtype), runErr, excerpt(env.Result))}
 		}
 		detail := stderr.String()
 		if strings.TrimSpace(detail) == "" {
 			detail = stdout.String()
 		}
-		return nil, nil, &Error{Reason: fmt.Sprintf("claude CLI failed (%v): %s", runErr, excerpt(detail))}
+		return nil, &Error{Reason: fmt.Sprintf("claude CLI failed (%v): %s", runErr, excerpt(detail))}
 	}
 	if envErr != nil {
-		return nil, nil, &Error{Reason: fmt.Sprintf("claude CLI returned non-JSON output (%v): %s",
+		return nil, &Error{Reason: fmt.Sprintf("claude CLI returned non-JSON output (%v): %s",
 			envErr, excerpt(stdout.String()))}
 	}
 	if env.IsError {
-		return nil, nil, &Error{Reason: fmt.Sprintf("claude reported an error (subtype=%s): %s",
+		return nil, &Error{Reason: fmt.Sprintf("claude reported an error (subtype=%s): %s",
 			orNone(env.Subtype), excerpt(env.Result))}
 	}
 	raw := bytes.TrimSpace(env.StructuredOutput)
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
-		return nil, nil, &Error{Reason: fmt.Sprintf("claude response has no structured_output (subtype=%s)%s",
+		return nil, &Error{Reason: fmt.Sprintf("claude response has no structured_output (subtype=%s)%s",
 			orNone(env.Subtype), resultSuffix(env.Result))}
 	}
+	return &StructuredResult{Output: raw, CostUSD: env.TotalCostUSD, DurationMS: env.DurationMS, Wall: wall}, nil
+}
 
-	out, err := decodePlannerOutput(raw)
+func (c *Client) runClaude(parent context.Context, bin, prompt string) (*plannerOutput, map[string]interface{}, error) {
+	res, err := c.invoke(parent, bin, StructuredCall{
+		Model:        c.cfg.ClaudeModel,
+		SystemPrompt: c.systemPrompt,
+		Schema:       c.plannerSchema,
+		Stdin:        prompt,
+		Timeout:      time.Duration(c.cfg.ClaudeTimeoutSeconds) * time.Second,
+	})
 	if err != nil {
-		return nil, nil, &Error{Reason: fmt.Sprintf("malformed structured_output: %v: %s", err, excerpt(string(raw)))}
+		return nil, nil, err
 	}
-
-	durationMS := env.DurationMS
+	out, err := decodePlannerOutput(res.Output)
+	if err != nil {
+		return nil, nil, &Error{Reason: fmt.Sprintf("malformed structured_output: %v: %s", err, excerpt(string(res.Output)))}
+	}
 	meta := map[string]interface{}{
 		"source":      SourceClaude,
 		"model":       c.cfg.ClaudeModel,
-		"duration_ms": durationMS,
-		"cost_usd":    env.TotalCostUSD,
-		"wall_ms":     wall.Milliseconds(),
+		"duration_ms": res.DurationMS,
+		"cost_usd":    res.CostUSD,
+		"wall_ms":     res.Wall.Milliseconds(),
 	}
 	return out, meta, nil
 }
 
-type plannerSelector struct {
+// PlanSpec is the plan shape the LLM produces (planner output "plan", interpretation
+// hypotheses' "test.plan"); ToExperimentPlan turns it into an ExperimentPlan for the validator.
+type PlanSpecSelector struct {
 	GroupID   string   `json:"group_id,omitempty"`
 	NeuronIDs []string `json:"neuron_ids,omitempty"`
 }
 
-type plannerActivation struct {
+type PlanSpecActivation struct {
 	GroupID   string   `json:"group_id,omitempty"`
 	NeuronIDs []string `json:"neuron_ids,omitempty"`
 	RateHz    float64  `json:"rate_hz"`
 }
 
-type plannerPlan struct {
-	ExperimentType string              `json:"experiment_type"`
-	Activation     []plannerActivation `json:"activation"`
-	Silencing      []plannerSelector   `json:"silencing"`
-	Readout        []plannerSelector   `json:"readout"`
-	DurationMs     float64             `json:"duration_ms"`
-	Repeats        int                 `json:"repeats"`
-	BaseSeed       uint64              `json:"base_seed"`
+type PlanSpec struct {
+	ExperimentType string               `json:"experiment_type"`
+	Activation     []PlanSpecActivation `json:"activation"`
+	Silencing      []PlanSpecSelector   `json:"silencing"`
+	Readout        []PlanSpecSelector   `json:"readout"`
+	DurationMs     float64              `json:"duration_ms"`
+	Repeats        int                  `json:"repeats"`
+	BaseSeed       uint64               `json:"base_seed"`
 }
 
 type plannerOutput struct {
-	Status           string       `json:"status"`
-	Message          string       `json:"message"`
-	UnresolvedFields []string     `json:"unresolved_fields"`
-	Plan             *plannerPlan `json:"plan"`
+	Status           string    `json:"status"`
+	Message          string    `json:"message"`
+	UnresolvedFields []string  `json:"unresolved_fields"`
+	Plan             *PlanSpec `json:"plan"`
 }
 
 func decodePlannerOutput(raw []byte) (*plannerOutput, error) {
@@ -480,7 +541,7 @@ func (c *Client) interpret(out *plannerOutput, meta map[string]interface{}, data
 		}, nil
 	}
 
-	plan := toExperimentPlan(out.Plan, datasetID, lang)
+	plan := ToExperimentPlan(out.Plan, datasetID, lang)
 	raw, err := json.Marshal(plan)
 	if err != nil {
 		return nil, &Error{Reason: fmt.Sprintf("cannot encode planner plan: %v", err)}
@@ -499,7 +560,8 @@ func (c *Client) interpret(out *plannerOutput, meta map[string]interface{}, data
 	}, nil
 }
 
-func toExperimentPlan(p *plannerPlan, datasetID, lang string) *domain.ExperimentPlan {
+// ToExperimentPlan converts an LLM plan into the canonical plan (dataset defaults to flywire_630).
+func ToExperimentPlan(p *PlanSpec, datasetID, lang string) *domain.ExperimentPlan {
 	if datasetID == "" {
 		datasetID = "flywire_630"
 	}

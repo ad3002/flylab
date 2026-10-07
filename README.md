@@ -31,6 +31,10 @@ Designed for deployment at **`flylab.aglabx.com`** and public distribution via [
   - Claude decides `ready` / `needs_input` / `unsupported` (whole-animal behaviour such as walking or flight is out of scope); there are no keyword pre-filters.
   - No silent fallback: planner failures return `502 LLM_ERROR` with the reason; only a missing `claude` binary switches to a keyword parser, and that response carries a visible `llm_error`.
   - Global concurrency cap (`LLM_MAX_CONCURRENCY`, `503 LLM_BUSY`) and a per-user hourly limit (`PARSE_RATE_LIMIT_PER_HOUR`, `429 RATE_LIMITED`).
+- **AI Hypotheses about a Run (`internal/interpret`, contract `docs/v3_interpretation.md`)**:
+  - A deterministic digest of every succeeded run (totals, activity by FlyWire super class / cell class / neurotransmitter, top neurons with annotations, first-spike latency, synaptic hops and signed direct input from the stimulated and silenced sets via `flysim digest`, readouts with literature-backed behavioural proxies, annotation coverage, model facts) is sent to `claude -p` (`claude-opus-5-5` by default).
+  - Claude returns observations and falsifiable hypotheses with calibrated confidence, evidence and a runnable follow-up plan; each plan is re-validated (`plan_id` or a visible `plan_error`), and evidence naming neuron ids absent from the digest is flagged in `evidence_warnings`. Every answer carries a fixed disclaimer: these are AI-generated hypotheses about a model, not biological findings.
+  - Runs finished before v3 are interpretable without re-running: `digest_graph.json` is computed lazily from the stored `spikes.parquet` (a missing file is a visible `digest_error`).
 - **Accounts & History**:
   - Username/password accounts (PBKDF2-SHA256, 210 000 iterations), 30-day sessions via an `HttpOnly` cookie or `Authorization: Bearer`.
   - Every job belongs to its creator; other users get `404`. `GET /api/v1/jobs` is a per-user history with the stored plan and a compact result summary (a corrupt `summary.json` is reported in `summary_error`, never dropped).
@@ -137,7 +141,12 @@ Compiles `bin/flysim` (Rust release) and `bin/flylab` (Go server).
 ```bash
 make data
 ```
-Verifies SHA256 integrity of FlyWire data and builds `data/cache/flywire_630_csr.bin`.
+Verifies SHA256 integrity of FlyWire data and builds `data/cache/flywire_630_csr.bin`. It also downloads the
+FlyWire neuron annotations (Schlegel et al., Nature 2024; pinned commit and SHA-256 in
+`data/dataset_manifest.json` → `files.annotations`) and derives `data/annotations_630.tsv` for the v630 root
+ids (106,214 of 127,400 neurons, 83.4 %; ids edited between materializations 630 and 783 stay unannotated).
+Without that file the server still runs, `/capabilities` reports `annotations_ready: false`, and every
+digest carries a coverage warning.
 
 ### 3. Run Automated Tests & Smoke Verification
 ```bash
@@ -188,6 +197,11 @@ All settings are environment variables (see `.env.example`). A variable that is 
 | `LOGIN_FAILURES_PER_USERNAME` | `10` | failed logins per username per 15 min before it is locked for the window (`scope=username`) |
 | `REGISTER_RATE_LIMIT_PER_IP_PER_HOUR` | `5` | accounts created per client address per hour (`scope=register_ip`) |
 | `PASSWORD_HASH_CONCURRENCY` | `4` | concurrent PBKDF2 checks; more waiting than 2 s get `503 AUTH_BUSY` |
+| `CLAUDE_INTERPRET_MODEL` | `claude-opus-5-5` | model of `POST /api/v1/jobs/{id}/interpretation` |
+| `CLAUDE_INTERPRET_TIMEOUT_SECONDS` | `180` | hard timeout per interpretation call |
+| `INTERPRET_RATE_LIMIT_PER_HOUR` | `20` | new interpretations per user per hour (cached answers are free; `429`, `scope=user`) |
+| `INTERPRET_RATE_LIMIT_PER_IP_PER_HOUR` | `40` | new interpretations per client address per hour (`scope=ip`) |
+| `INTERPRET_GLOBAL_LIMIT_PER_HOUR` | `100` | new interpretations for the whole server per hour (`scope=global`) |
 
 ---
 
@@ -297,6 +311,21 @@ curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8080/api/v1/jobs/{jo
 # Download complete self-contained reproducibility archive
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/api/v1/jobs/{job_id}/export -o experiment_export.zip
 ```
+
+### 9. AI Hypotheses about a Finished Run (v3)
+```bash
+# deterministic digest only (no LLM call); computes digest_graph.json for older runs on first use
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/api/v1/jobs/{job_id}/digest
+
+# generate (or return the cached) interpretation; regenerate=true replaces it
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"language":"ru"}' http://127.0.0.1:8080/api/v1/jobs/{job_id}/interpretation
+
+# latest stored interpretation (404 INTERPRETATION_NOT_FOUND when there is none)
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/api/v1/jobs/{job_id}/interpretation
+```
+A real interpretation takes about two minutes with `claude-opus-5-5`; keep reverse-proxy read timeouts
+above `CLAUDE_INTERPRET_TIMEOUT_SECONDS` + 120 s.
 
 ---
 

@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use flysim::digest::compute_digest;
 use flysim::graph::ConnectomeGraph;
 use flysim::input::{
     generate_deterministic_events_with_rates, index_events_by_tick, load_events_from_parquet,
@@ -16,7 +17,7 @@ use flysim::input::{
 use flysim::manifest::{DatasetManifest, ResolvedPlan};
 use flysim::model::{AnalyticalCoefficients, LifParameters, NetworkState};
 use flysim::output::{
-    generate_checksums, save_comparison_csv, save_rates_csv, save_spikes_parquet,
+    generate_checksums, load_spikes_parquet, save_comparison_csv, save_rates_csv, save_spikes_parquet,
     ComparisonRow, NeuronRate, OutputSpike,
 };
 
@@ -65,6 +66,19 @@ enum Commands {
         output: PathBuf,
         #[arg(long)]
         cache_dir: Option<PathBuf>,
+    },
+    /// Read-only graph facts (latency, hops, direct input) for the neurons that spiked in a run
+    Digest {
+        #[arg(long)]
+        resolved_plan: PathBuf,
+        #[arg(long)]
+        spikes: PathBuf,
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+        #[arg(long)]
+        output: PathBuf,
     },
 }
 
@@ -307,13 +321,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         computed_hash = h;
                     }
                 }
-                if !exists || !hash_matches {
+                // An optional file that is absent is fine; present, it must match its checksum.
+                let optional_absent = info.optional && !exists;
+                if !optional_absent && (!exists || !hash_matches) {
                     all_valid = false;
                 }
 
                 files_status.push(json!({
                     "name": key,
                     "filename": info.filename,
+                    "optional": info.optional,
                     "exists": exists,
                     "expected_sha256": info.sha256,
                     "computed_sha256": computed_hash,
@@ -766,6 +783,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let pretty_json = serde_json::to_string_pretty(&result)?;
             std::fs::write(output.join("summary.json"), &pretty_json)?;
             println!("{}", pretty_json);
+        }
+
+        Commands::Digest {
+            resolved_plan,
+            spikes,
+            manifest,
+            cache_dir,
+            output,
+        } => {
+            let t0 = Instant::now();
+            let plan = ResolvedPlan::load_from_file(&resolved_plan)
+                .map_err(|e| format!("cannot read resolved plan {}: {e}", resolved_plan.display()))?;
+            let recorded = load_spikes_parquet(&spikes)
+                .map_err(|e| format!("cannot read spikes {}: {e}", spikes.display()))?;
+            let graph = resolve_graph(&manifest, cache_dir.as_deref())?;
+            let params = LifParameters::default();
+            let digest = compute_digest(&graph, &plan, &recorded, &params)?;
+
+            // Write to a temporary file and rename, so a reader never sees a half-written digest.
+            let tmp = output.with_extension("json.tmp");
+            std::fs::write(&tmp, serde_json::to_string_pretty(&digest)?)
+                .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+            std::fs::rename(&tmp, &output)
+                .map_err(|e| format!("cannot move {} to {}: {e}", tmp.display(), output.display()))?;
+
+            emit_event(
+                "result",
+                "digest",
+                100.0,
+                json!({
+                    "status": "digested",
+                    "output": output.to_string_lossy(),
+                    "neurons": digest.neurons.len(),
+                    "spikes": recorded.len(),
+                    "elapsed_seconds": t0.elapsed().as_secs_f64()
+                }),
+            );
         }
     }
 

@@ -61,14 +61,16 @@ func quoteList(items []string) string {
 	return strings.Join(q, ", ")
 }
 
-// buildPlannerSchema returns the JSON schema passed with --json-schema.
-func buildPlannerSchema(reg *contracts.Registry, l contracts.PlanLimits) (string, error) {
+// PlanSchema returns the JSON schema object of a planner plan (the "plan" property of the
+// planner output). The interpretation schema reuses it for each hypothesis' test plan, so both
+// LLM outputs share one plan shape and one set of limits.
+func PlanSchema(reg *contracts.Registry, l contracts.PlanLimits) (map[string]interface{}, error) {
 	groupIDs := make([]string, 0, len(reg.Groups))
 	for _, g := range reg.Groups {
 		groupIDs = append(groupIDs, g.GroupID)
 	}
 	if len(groupIDs) == 0 {
-		return "", fmt.Errorf("registry has no groups")
+		return nil, fmt.Errorf("registry has no groups")
 	}
 	neuronIDs := map[string]interface{}{
 		"type":     "array",
@@ -85,6 +87,42 @@ func buildPlannerSchema(reg *contracts.Registry, l contracts.PlanLimits) (string
 			"neuron_ids": neuronIDs,
 		},
 	}
+	return map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"experiment_type", "activation", "silencing", "readout", "duration_ms", "repeats", "base_seed"},
+		"properties": map[string]interface{}{
+			"experiment_type": map[string]interface{}{"type": "string", "enum": l.ExperimentTypes},
+			"activation": map[string]interface{}{
+				"type":     "array",
+				"minItems": 1,
+				"maxItems": l.ActivationMax,
+				"items": map[string]interface{}{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []string{"rate_hz"},
+					"properties": map[string]interface{}{
+						"group_id":   groupID,
+						"neuron_ids": neuronIDs,
+						"rate_hz":    map[string]interface{}{"type": "number", "minimum": l.RateMinHz, "maximum": l.RateMaxHz},
+					},
+				},
+			},
+			"silencing":   map[string]interface{}{"type": "array", "maxItems": 20, "items": selector},
+			"readout":     map[string]interface{}{"type": "array", "minItems": 1, "maxItems": 20, "items": selector},
+			"duration_ms": map[string]interface{}{"type": "number", "minimum": l.DurationMinMs, "maximum": l.DurationMaxMs},
+			"repeats":     map[string]interface{}{"type": "integer", "minimum": l.RepeatsMin, "maximum": l.RepeatsMax},
+			"base_seed":   map[string]interface{}{"type": "integer", "minimum": 0, "maximum": l.BaseSeedMax},
+		},
+	}, nil
+}
+
+// buildPlannerSchema returns the JSON schema passed with --json-schema.
+func buildPlannerSchema(reg *contracts.Registry, l contracts.PlanLimits) (string, error) {
+	plan, err := PlanSchema(reg, l)
+	if err != nil {
+		return "", err
+	}
 	schema := map[string]interface{}{
 		"type":                 "object",
 		"additionalProperties": false,
@@ -93,34 +131,7 @@ func buildPlannerSchema(reg *contracts.Registry, l contracts.PlanLimits) (string
 			"status":            map[string]interface{}{"type": "string", "enum": []string{"ready", "needs_input", "unsupported"}},
 			"message":           map[string]interface{}{"type": "string", "minLength": 1},
 			"unresolved_fields": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-			"plan": map[string]interface{}{
-				"type":                 "object",
-				"additionalProperties": false,
-				"required":             []string{"experiment_type", "activation", "silencing", "readout", "duration_ms", "repeats", "base_seed"},
-				"properties": map[string]interface{}{
-					"experiment_type": map[string]interface{}{"type": "string", "enum": l.ExperimentTypes},
-					"activation": map[string]interface{}{
-						"type":     "array",
-						"minItems": 1,
-						"maxItems": l.ActivationMax,
-						"items": map[string]interface{}{
-							"type":                 "object",
-							"additionalProperties": false,
-							"required":             []string{"rate_hz"},
-							"properties": map[string]interface{}{
-								"group_id":   groupID,
-								"neuron_ids": neuronIDs,
-								"rate_hz":    map[string]interface{}{"type": "number", "minimum": l.RateMinHz, "maximum": l.RateMaxHz},
-							},
-						},
-					},
-					"silencing":   map[string]interface{}{"type": "array", "maxItems": 20, "items": selector},
-					"readout":     map[string]interface{}{"type": "array", "minItems": 1, "maxItems": 20, "items": selector},
-					"duration_ms": map[string]interface{}{"type": "number", "minimum": l.DurationMinMs, "maximum": l.DurationMaxMs},
-					"repeats":     map[string]interface{}{"type": "integer", "minimum": l.RepeatsMin, "maximum": l.RepeatsMax},
-					"base_seed":   map[string]interface{}{"type": "integer", "minimum": 0, "maximum": l.BaseSeedMax},
-				},
-			},
+			"plan":              plan,
 		},
 	}
 	raw, err := json.Marshal(schema)

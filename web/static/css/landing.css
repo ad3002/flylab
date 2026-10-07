@@ -509,3 +509,16 @@ html:not(.js) #status-pill { display: none; }
 @media (pointer: coarse) {
   .footer-links a, .ref-src a { display: inline-flex; align-items: center; min-height: 44px; }
 }
+
+/* step 5: AI hypotheses — dashed cyan for what Claude proposes, a hatched label for the disclaimer */
+.artifact-hyp { border: 1px dashed rgba(139, 234, 247, 0.45); }
+.artifact-hyp .hyp-stamp {
+  margin: 0 0 16px; padding: 12px 14px; border-radius: var(--r-s);
+  border: 1px solid rgba(139, 234, 247, 0.5);
+  background: repeating-linear-gradient(-45deg, rgba(139, 234, 247, 0.075) 0 7px, transparent 7px 15px), rgba(139, 234, 247, 0.05);
+  color: var(--text); font-size: 0.95rem; line-height: 1.5; white-space: normal;
+}
+.artifact-hyp .hyp-stamp b { display: block; color: var(--cyan); font-weight: 700; margin-bottom: 2px; }
+.artifact .c { color: var(--cyan); }
+.artifact .t { color: var(--text); }
+@media (max-width: 520px) { .artifact-hyp .hyp-stamp { font-size: 0.88rem; } }

@@ -1,0 +1,7 @@
+root_id	flow	super_class	cell_class	cell_sub_class	cell_type	hemibrain_type	top_nt	top_nt_conf	side	nerve
+720575940612670570	afferent	sensory	gustatory	sugar	LB3c		acetylcholine	0.5174281997479576	left	MxLbN
+720575940616885538	afferent	sensory	gustatory	sugar	LB3c		acetylcholine	0.5174281997479576	left	MxLbN
+720575940611875570	afferent	sensory	gustatory	high_salt/heavy_metal	LB3d		acetylcholine	0.6204716141343772	left	MxLbN
+720575940624963786	afferent	sensory	gustatory	putative_attractive	LB4b		acetylcholine		left	MxLbN
+720575940660219265	efferent	motor	brain_motor_neuron	ingestion_motor_neuron	CB0701		acetylcholine	0.4390765645416484	right	PhN
+720575940000000001	intrinsic	central			FIXTURE_GABA_1		gaba	0.9	right	

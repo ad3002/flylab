@@ -20,6 +20,7 @@ import (
 	"github.com/ad3002/flylab/internal/contracts"
 	"github.com/ad3002/flylab/internal/domain"
 	"github.com/ad3002/flylab/internal/export"
+	"github.com/ad3002/flylab/internal/interpret"
 	"github.com/ad3002/flylab/internal/llm"
 	"github.com/ad3002/flylab/internal/ratelimit"
 	"github.com/ad3002/flylab/internal/storage"
@@ -34,6 +35,7 @@ type Server struct {
 	router    *http.ServeMux
 	auth      *authGuard
 	worker    WorkerStatus
+	interp    *interpret.Service
 }
 
 // WorkerStatus is the background worker's health as the API reports it. LastError is nil
@@ -138,6 +140,10 @@ func (s *Server) registerRoutes() {
 		s.router.HandleFunc("GET "+prefix+"/jobs/{job_id}/spikes", s.requireAuth(s.handleJobSpikes))
 		s.router.HandleFunc("GET "+prefix+"/jobs/{job_id}/export", s.requireAuth(s.handleJobExport))
 		s.router.HandleFunc("GET "+prefix+"/jobs/{job_id}/artifacts/{artifact_id}", s.requireAuth(s.handleJobArtifact))
+		// v3 interpretation
+		s.router.HandleFunc("GET "+prefix+"/jobs/{job_id}/digest", s.requireAuth(s.handleJobDigest))
+		s.router.HandleFunc("GET "+prefix+"/jobs/{job_id}/interpretation", s.requireAuth(s.handleGetInterpretation))
+		s.router.HandleFunc("POST "+prefix+"/jobs/{job_id}/interpretation", s.requireAuth(s.handlePostInterpretation))
 	}
 }
 
@@ -193,7 +199,15 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	_, dataErr := os.Stat(filepath.Join(s.cfg.DataDir, "dataset_manifest.json"))
 	_, flysimErr := os.Stat(s.cfg.FlysimBin)
 
+	annReady, annCount, interpModel := false, 0, s.cfg.ClaudeInterpretModel
+	if s.interp != nil {
+		annReady, annCount = s.interp.Annotations().Ready, s.interp.Annotations().Count()
+	}
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"annotations_ready": annReady,
+		"annotations_count": annCount,
+		"interpret_model":   interpModel,
+		"interpret_ready":   s.interp != nil && s.llmClient.Ready(),
 		"datasets_ready":    dataErr == nil,
 		"worker_ready":      flysimErr == nil && s.workerError() == nil,
 		"worker_error":      s.workerError(),
@@ -496,9 +510,10 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request, user *do
 		s.writeError(w, r, http.StatusInternalServerError, "LIST_JOBS_ERROR", err.Error(), nil)
 		return
 	}
-	out := make([]*domain.HistoryJob, 0, len(jobs))
-	for _, j := range jobs {
-		out = append(out, s.buildHistoryJob(j))
+	out, err := s.buildHistoryJobs(jobs)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "LIST_JOBS_ERROR", err.Error(), nil)
+		return
 	}
 
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -530,7 +545,12 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request, user *doma
 	if !ok {
 		return
 	}
-	s.writeJSON(w, http.StatusOK, s.buildHistoryJob(job))
+	out, err := s.buildHistoryJobs([]*domain.Job{job})
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "GET_JOB_ERROR", err.Error(), nil)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, out[0])
 }
 
 func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request, user *domain.User) {

@@ -8,7 +8,7 @@
       "aliases": ["sugar", "sugar_sensing", "sugar_receptors"],
       "dataset_id": "flywire_630",
       "source_reference": "Shiu et al. 2024, example.ipynb & figures.ipynb Cell 23",
-      "description": "Labellar sugar-sensing gustatory receptor neurons on the right hemisphere.",
+      "description": "Labellar sugar-sensing gustatory receptor neurons of one hemisphere. Shiu et al.'s notebooks call it the right hemisphere in the FAFB image convention, which predates FlyWire's left/right correction; on the fly these neurons are on the LEFT (FlyWire annotation side: left).",
       "neuron_ids": [
         "720575940611875570",
         "720575940612670570",
@@ -40,7 +40,7 @@
       "aliases": ["feeding_motor_neuron", "mn9_bilateral"],
       "dataset_id": "flywire_630",
       "source_reference": "Shiu et al. 2024, example.ipynb & figures.ipynb Cell 8/17",
-      "description": "Bilateral motor neuron pair controlling proboscis extension during feeding (MN9 left: 720575940660219265, right: 720575940645521262).",
+      "description": "Bilateral motor neuron pair controlling proboscis extension during feeding. Shiu et al.'s notebooks label 720575940660219265 \"left\" and 720575940645521262 \"right\" in the FAFB image convention, which is mirrored: 720575940660219265 is on the fly's right (FlyWire annotation side: right), contralateral to the registry GRN groups.",
       "neuron_ids": [
         "720575940645521262",
         "720575940660219265"
@@ -65,7 +65,7 @@
       "aliases": ["bitter", "bitter_sensing"],
       "dataset_id": "flywire_630",
       "source_reference": "Shiu et al. 2024, figures.ipynb Cell 23",
-      "description": "Labellar bitter-sensing gustatory receptor neurons on the right hemisphere.",
+      "description": "Labellar bitter-sensing gustatory receptor neurons of one hemisphere. Shiu et al.'s notebooks call it the right hemisphere in the FAFB image convention, which predates FlyWire's left/right correction; on the fly these neurons are on the LEFT (FlyWire annotation side: left).",
       "neuron_ids": [
         "720575940602353632",
         "720575940604027168",
@@ -97,7 +97,7 @@
       "aliases": ["ir94e_grn"],
       "dataset_id": "flywire_630",
       "source_reference": "Shiu et al. 2024, figures.ipynb Cell 23",
-      "description": "Labellar Ir94e receptor neurons on the right hemisphere.",
+      "description": "Labellar Ir94e receptor neurons of one hemisphere. Shiu et al.'s notebooks call it the right hemisphere in the FAFB image convention, which predates FlyWire's left/right correction; on the fly these neurons are on the LEFT (FlyWire annotation side: left).",
       "neuron_ids": [
         "720575940610683315",
         "720575940612920386",
