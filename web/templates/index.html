@@ -13,8 +13,12 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,100..900;1,62..125,100..900&family=Hanken+Grotesk:ital,wght@0,400..700;1,400&family=Martian+Mono:wdth,wght@75..112.5,100..800&display=swap">
   <link rel="preload" as="image" href="/static/img/hero-far.jpg" media="(min-width: 761px)">
   <link rel="preload" as="image" href="/static/img/hero-far-960.jpg" media="(max-width: 760px)">
-  <link rel="stylesheet" href="/static/css/style.css">
-  <link rel="stylesheet" href="/static/css/landing.css">
+  <link rel="stylesheet" href="/static/css/style.css?v=motion2">
+  <link rel="stylesheet" href="/static/css/landing.css?v=motion2">
+  <!-- Motion flags before first paint: .mo = motion allowed, .intro = play the hero entrance.
+       Scroll-reveal "before" states additionally need html.reveal-armed, which only landing.js sets
+       once its observer exists: if the module fails, nothing stays hidden. -->
+  <script>(function(d){d.classList.add("js");if(!window.matchMedia("(prefers-reduced-motion: reduce)").matches){d.classList.add("mo","intro");}})(document.documentElement);</script>
 </head>
 <body class="landing">
   <a class="skip" href="#main">Skip to content</a>
@@ -58,14 +62,14 @@
 
       <div class="hero-copy">
         <p class="eyebrow hero-eyebrow">Drosophila melanogaster &middot; FlyWire v630 &middot; LIF model after Shiu et&nbsp;al.&nbsp;2024</p>
-        <h1 class="display hero-title" id="hero-title">Run the whole fly&nbsp;brain from a&nbsp;<span class="tick-underline">sentence</span>.</h1>
+        <h1 class="display hero-title" id="hero-title" aria-label="Run the whole fly brain from a sentence."><span class="lm" aria-hidden="true"><span class="li">Run</span></span> <span class="lm" aria-hidden="true"><span class="li">the</span></span> <span class="lm" aria-hidden="true"><span class="li">whole</span></span> <span class="lm" aria-hidden="true"><span class="li">fly&nbsp;brain</span></span> <span class="lm" aria-hidden="true"><span class="li">from</span></span> <span class="lm" aria-hidden="true"><span class="li">a&nbsp;<span class="tick-underline">sentence</span>.</span></span></h1>
         <p class="lede">Say what to stimulate, what to silence and what to watch. FlyLab turns it into a checked experiment plan, simulates every neuron in the adult fly brain, and hands you the spikes.</p>
 
         <form class="teaser" id="teaser" action="/app" method="get">
           <label class="sr-only" for="teaser-input">Describe an experiment</label>
           <span class="teaser-mark" aria-hidden="true">/</span>
           <input id="teaser-input" name="p" type="text" autocomplete="off" maxlength="4000" placeholder="Activate sugar GRNs at 100 Hz and read out MN9">
-          <button class="btn btn-primary" type="submit">Open the lab <span class="arrow" aria-hidden="true">→</span></button>
+          <button class="btn btn-primary" type="submit" data-magnetic="6">Open the lab <span class="arrow" aria-hidden="true">→</span></button>
         </form>
         <p class="hint mono"><span class="hint-dot" aria-hidden="true"></span><span class="hint-pointer">Move your cursor across the network — it stimulates the cells under it.</span><span class="hint-touch">The network on this page is firing live.</span></p>
       </div>
@@ -82,8 +86,8 @@
     <!-- ============ STATEMENT ============ -->
     <section class="statement" aria-label="What FlyLab simulates">
       <p class="statement-text reveal">
-        <span class="num">127,400</span> neurons. <span class="num">14,687,178</span> synapses.
-        <span class="num">100&nbsp;ms</span> of whole-brain activity in about <span class="num">1&nbsp;s</span> of compute &mdash;
+        <span class="num" data-count>127,400</span> neurons. <span class="num" data-count>14,687,178</span> synapses.
+        <span class="num" data-count>100&nbsp;ms</span> of whole-brain activity in about <span class="num">1&nbsp;s</span> of compute &mdash;
         and every spike matches the Brian2 reference run, <em>bit for bit</em>.
       </p>
     </section>
@@ -93,10 +97,10 @@
       <div class="how-texture" aria-hidden="true"><img src="/static/img/spike-texture.jpg" alt="" loading="lazy" decoding="async" data-optional></div>
       <div class="how-grid">
         <div class="how-head">
-          <p class="eyebrow">How it works</p>
+          <p class="eyebrow reveal">How it works</p>
           <h2 class="display h2" id="how-title">From a sentence to spikes, in four&nbsp;steps.</h2>
-          <p class="muted-p">Each step leaves something you can inspect: the words you wrote, the plan that was checked, the run that happened, the files you keep.</p>
-          <a class="btn" href="/app">Try it <span class="arrow" aria-hidden="true">→</span></a>
+          <p class="muted-p reveal">Each step leaves something you can inspect: the words you wrote, the plan that was checked, the run that happened, the files you keep.</p>
+          <a class="btn reveal" href="/app">Try it <span class="arrow" aria-hidden="true">→</span></a>
         </div>
         <ol class="steps">
           <li class="step reveal">
@@ -150,22 +154,23 @@
             <img src="/static/img/fly-brain.jpg" alt="Illustrated render of the adult Drosophila brain: two optic lobes flanking the central brain" width="1600" height="1200" loading="lazy" decoding="async">
           </picture>
           <div class="brain-notes" id="brain-notes" aria-hidden="true">
-          <span class="note note-ol" style="--x:9%; --y:50%"><i></i><b>Optic lobe</b></span>
-          <span class="note note-mb" style="--x:31%; --y:25%"><i></i><b>Mushroom body</b></span>
-          <span class="note note-cx" style="--x:50%; --y:40%"><i></i><b>Central complex</b></span>
-          <span class="note note-sez" style="--x:50%; --y:83%"><i></i><b>Subesophageal zone<span class="note-long">&nbsp;— taste in, MN9 out</span></b></span>
+          <span class="sez-glow"></span>
+          <span class="note note-ol" style="--x:9%; --y:50%; --i:0"><i></i><b>Optic lobe</b></span>
+          <span class="note note-mb" style="--x:31%; --y:25%; --i:1"><i></i><b>Mushroom body</b></span>
+          <span class="note note-cx" style="--x:50%; --y:40%; --i:2"><i></i><b>Central complex</b></span>
+          <span class="note note-sez" style="--x:50%; --y:83%; --i:3"><i></i><b>Subesophageal zone<span class="note-long">&nbsp;— taste in, MN9 out</span></b></span>
           </div>
         </div>
       </div>
       <div class="brain-copy">
         <div class="brain-copy-head">
-          <p class="eyebrow">The connectome</p>
+          <p class="eyebrow reveal">The connectome</p>
           <h2 class="display h2" id="brain-title">Not a toy network. The fly’s actual wiring.</h2>
         </div>
         <div class="brain-copy-body">
-        <p>Every connection in the simulation is a synapse reconstructed by FlyWire from electron microscopy of an adult female <em>Drosophila</em> brain: 127,400 proofread neurons, 14,687,178 synapses, each with its own sign and weight.</p>
-        <p>Stimulate the labellar sugar receptors and the signal has to find its own way through that wiring to MN9, the motor neuron that extends the proboscis. Nothing is shortcut.</p>
-        <p class="caption mono">Image: illustrative render. Simulations use the full v630 reconstruction.</p>
+        <p class="reveal">Every connection in the simulation is a synapse reconstructed by FlyWire from electron microscopy of an adult female <em>Drosophila</em> brain: 127,400 proofread neurons, 14,687,178 synapses, each with its own sign and weight.</p>
+        <p class="reveal">Stimulate the labellar sugar receptors and the signal has to find its own way through that wiring to MN9, the motor neuron that extends the proboscis. Nothing is shortcut.</p>
+        <p class="caption mono reveal">Image: illustrative render. Simulations use the full v630 reconstruction.</p>
         </div>
       </div>
     </section>
@@ -174,18 +179,26 @@
     <section class="examples" id="examples" aria-labelledby="examples-title">
       <div class="examples-head">
         <div>
-          <p class="eyebrow">Examples</p>
+          <p class="eyebrow reveal">Examples</p>
           <h2 class="display h2" id="examples-title">Start from an example.</h2>
         </div>
-        <p class="muted-p">Each thumbnail is the fingerprint of a run — magenta for the baseline condition, green for the silenced one, cyan for the stimulus train. Pick one to start from it.</p>
+        <p class="muted-p reveal">Each thumbnail is the fingerprint of a run — magenta for the baseline condition, green for the silenced one, cyan for the stimulus train. Pick one to start from it.</p>
       </div>
-      <div class="strip" id="strip" role="group" aria-label="Example experiments"></div>
+      <div class="strip" id="strip" role="group" aria-label="Example experiments">
+        <noscript>
+          <p class="strip-noscript">The example gallery needs JavaScript. Start from one of these instead:
+            <a href="/app#/new?p=Activate%20sugar%20GRNs%20at%20100%20Hz%20and%20read%20out%20MN9">Activate sugar GRNs at 100 Hz and read out MN9</a>
+            <a href="/app#/new?p=Compare%20bitter%20GRN%20activation%20with%20and%20without%20silencing%20the%20top%20sugar%20neuron">Compare bitter GRN activation with and without silencing the top sugar neuron</a>
+            <a href="/app#/new?p=Ir94e%20neurons%20at%2080%20Hz%20for%20500%20ms%2C%20three%20repeats">Ir94e neurons at 80 Hz for 500 ms, three repeats</a>
+          </p>
+        </noscript>
+      </div>
     </section>
 
     <!-- ============ SCIENCE ============ -->
     <section class="science" id="science" aria-labelledby="science-title">
       <div class="science-head">
-        <p class="eyebrow">Science</p>
+        <p class="eyebrow reveal">Science</p>
         <h2 class="display h2" id="science-title">Built on published work, and checked against it.</h2>
       </div>
       <ol class="refs">
@@ -216,7 +229,7 @@
     <section class="cta" aria-labelledby="cta-title">
       <div class="cta-bg" aria-hidden="true"><img src="/static/img/spike-texture.jpg" alt="" loading="lazy" decoding="async" data-optional></div>
       <h2 class="display cta-title" id="cta-title">Ask the fly brain something.</h2>
-      <a class="btn btn-primary cta-btn" href="/app">Open the lab <span class="arrow" aria-hidden="true">→</span></a>
+      <a class="btn btn-primary cta-btn reveal" href="/app" data-magnetic="12">Open the lab <span class="arrow" aria-hidden="true">→</span></a>
     </section>
   </main>
 
@@ -234,6 +247,6 @@
     </nav>
   </footer>
 
-  <script type="module" src="/static/js/landing.js"></script>
+  <script type="module" src="/static/js/landing.js?v=motion2"></script>
 </body>
 </html>

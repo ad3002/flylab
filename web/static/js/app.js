@@ -1,9 +1,8 @@
 // FlyLab application: auth gate, composer, plan review, live runs, library, account.
 // Vanilla ES module. Every failure is shown on screen; nothing is only logged.
 
-import { SpikingNet, drawRasterThumb, drawResultRaster, hashString } from "/static/js/neural.js";
-
-const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+import { SpikingNet, SpikeTrace, drawRasterThumb, drawResultRaster, hashString } from "/static/js/neural.js?v=motion2";
+import { isReduced, onReducedChange, finePointer, EASE, DUR, STAGGER, enter, stagger, countUp, splitLines, segIndicator, toast, onceVisible } from "/static/js/motion.js?v=motion2";
 
 /* ================================================================== */
 /* helpers                                                             */
@@ -99,6 +98,105 @@ function errorBanner(title, err, actions = []) {
     msg = (err && err.message) || String(err);
   }
   return banner("error", title, msg, { meta, actions });
+}
+
+/* ---------- motion: skeletons, plan assembly, shared-element flight ---------- */
+const skelCard = (aspect) => h("div", { class: "skel-card", "aria-hidden": "true" },
+  h("div", { class: "skel skel-thumb", style: `aspect-ratio:${aspect}` }),
+  h("div", { class: "skel skel-line" }),
+  h("div", { class: "skel skel-line short" }));
+const skelGrid = (n) => h("div", { class: "skel-grid", "aria-hidden": "true" },
+  Array.from({ length: n }, (_, i) => skelCard([4 / 3, 1, 4 / 5, 16 / 10][i % 4])));
+
+// A plan card arrives field by field: frame first, then each section and each spec cell.
+function assemble(card) {
+  if (isReduced()) return;
+  enter(card, { y: 0, scale: 0.985, duration: DUR.view });
+  const parts = [];
+  for (const child of card.children) {
+    if (child.classList.contains("spec-grid")) parts.push(...child.children);
+    else parts.push(child);
+  }
+  stagger(parts, { start: 60, step: 35, max: 18, y: 10, duration: 520 });
+}
+
+/* Shared-element flight from a library card to the run page. The card's thumbnail pixels are
+   copied into a fixed canvas that flies (transform + clip-path only) onto the run page's art
+   box, then dissolves into the real art once that is drawn. Any route that is not the run page,
+   or a run page that fails to load, simply fades the ghost away. */
+let flip = null;
+function flipCapture(canvas) {
+  flipDrop();
+  if (isReduced() || !canvas.width || !canvas.isConnected) return;
+  const r = canvas.getBoundingClientRect();
+  if (r.width < 4 || r.bottom < 0 || r.top > window.innerHeight) return;
+  const g = document.createElement("canvas");
+  g.width = canvas.width;
+  g.height = canvas.height;
+  g.getContext("2d").drawImage(canvas, 0, 0);
+  g.className = "flip-ghost";
+  g.setAttribute("aria-hidden", "true");
+  Object.assign(g.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+  document.body.append(g);
+  flip = { ghost: g, rect: r, flying: false, landed: false, settle: false, timer: setTimeout(() => flipDrop(), 3000) };
+}
+function flipFly(target) {
+  if (!flip || flip.flying) return;
+  // The run may load before this frame; then the skeleton is gone and the real art is the target.
+  if (!target || !target.isConnected) target = view.querySelector(".job-art");
+  if (!target) { flipDrop(); return; }
+  const f = flip;
+  const t = target.getBoundingClientRect();
+  if (!t.width) { flipDrop(); return; }
+  f.flying = true;
+  const r = f.rect;
+  const s = t.width / r.width;
+  const extra = r.height * s - t.height; // >0: source is taller than the target, crop its bottom
+  const dy = t.top - r.top + (extra < 0 ? -extra / 2 : 0);
+  const radEnd = 22 / s;
+  const anim = f.ghost.animate([
+    { transform: "translate(0px, 0px) scale(1)", clipPath: "inset(0px 0px 0px 0px round 14px)" },
+    { transform: `translate(${t.left - r.left}px, ${dy}px) scale(${s})`, clipPath: `inset(0px 0px ${Math.max(0, extra / s)}px 0px round ${radEnd}px)` },
+  ], { duration: 640, easing: EASE.out, fill: "forwards" });
+  anim.onfinish = () => { f.landed = true; if (f.settle) flipSettle(); };
+}
+function flipSettle() {
+  if (!flip) return;
+  if (!flip.landed) { flip.settle = true; return; }
+  flipDrop(280);
+}
+function flipDrop(duration = 200) {
+  if (!flip) return;
+  const { ghost, timer } = flip;
+  flip = null;
+  clearTimeout(timer);
+  const a = ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration, easing: EASE.inout, fill: "forwards" });
+  a.onfinish = () => ghost.remove();
+  setTimeout(() => ghost.remove(), duration + 200);
+}
+
+/* Route crossfade. The outgoing view becomes a fixed, inert ghost that fades up and out while
+   the incoming view rises in underneath, so there is never an empty frame and the old view
+   never takes input. Ids are stripped from the ghost so lookups find only the new view. */
+function swapOut() {
+  if (isReduced() || shellEl.hidden || !view.childElementCount) { view.replaceChildren(); return; }
+  const r = view.getBoundingClientRect();
+  const ghost = h("div", { class: "view view-ghost", "aria-hidden": "true" });
+  ghost.inert = true;
+  Object.assign(ghost.style, { top: `${r.top}px`, left: `${r.left}px`, width: `${r.width}px` });
+  ghost.append(...view.childNodes);
+  ghost.querySelectorAll("[id]").forEach((el) => el.removeAttribute("id"));
+  shellEl.append(ghost);
+  // Sequential, not a double exposure: the old view is gone (140 ms, opacity only) before the
+  // new one starts to rise (110 ms in), so two large headlines never overprint each other.
+  const a = ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 140, easing: EASE.in, fill: "forwards" });
+  a.onfinish = () => ghost.remove();
+  setTimeout(() => ghost.remove(), 600);
+}
+function swapIn() {
+  // During a shared-element flight the view only fades, so the flight's target does not move.
+  if (flip) enter(view, { y: 0, duration: DUR.view, delay: 110 });
+  else enter(view, { y: 14, duration: 520, delay: 110 });
 }
 
 /* ================================================================== */
@@ -200,7 +298,9 @@ async function download(url, fallbackName, statusEl, label) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-  statusEl.replaceChildren(h("span", { class: "mono dl-progress ok", text: `${label} downloaded · ${(blob.size / 1024 / 1024).toFixed(2)} MB` }));
+  const done = `${label} downloaded · ${(blob.size / 1024 / 1024).toFixed(2)} MB`;
+  statusEl.replaceChildren(h("span", { class: "mono dl-progress ok", text: done }));
+  toast(done);
 }
 
 /* ================================================================== */
@@ -226,6 +326,25 @@ function later(fn, ms) {
   return id;
 }
 function clearTimers() { for (const id of timers) clearTimeout(id); timers.clear(); }
+
+/* Route lifetime. Everything a page starts that outlives its DOM by itself (live traces with
+   their observers and listeners, ResizeObservers, document-level listeners) is registered here
+   and torn down when the route changes or the account signs out. A trace whose canvas is
+   offscreen never sees another frame, so it cannot be relied on to notice it was removed. */
+const routeCleanups = new Set();
+const liveTraces = new Set();
+function onLeave(fn) { routeCleanups.add(fn); return fn; }
+function leaveRoute() {
+  for (const t of liveTraces) t.destroy();
+  liveTraces.clear();
+  for (const fn of routeCleanups) fn();
+  routeCleanups.clear();
+}
+function trace(canvas, opts) {
+  const t = new SpikeTrace(canvas, { ...opts, reduced: Boolean(opts.reduced) || isReduced() });
+  liveTraces.add(t);
+  return t;
+}
 
 /* ================================================================== */
 /* boot, auth gate, shell                                              */
@@ -280,6 +399,9 @@ function onSessionLost() {
 function showAuth(notice) {
   bootEl.hidden = true;
   shellEl.hidden = true;
+  leaveRoute();
+  view.replaceChildren(); // nothing of the previous account may linger (or crossfade) into the next
+  flipDrop(0);
   authEl.hidden = false;
   document.title = "Sign in — FlyLab";
   $("#auth-notice").replaceChildren(notice ? banner("info", notice) : "");
@@ -287,13 +409,49 @@ function showAuth(notice) {
   setAuthMode(authMode);
   applyRegistrationPolicy();
   if (!authNet) {
-    authNet = new SpikingNet($("#auth-net"), { reduced, seed: 94 });
+    authNet = new SpikingNet($("#auth-net"), { reduced: isReduced(), seed: 94, ignite: true, igniteOrigin: { x: 0.62, y: 0.42 } });
   } else {
     authNet.resize();
+    authNet.igniteWanted = !isReduced(); // every arrival at the sign-in screen re-ignites the field
   }
   authNet.start();
-  setTimeout(() => $("#auth-username").focus(), 30);
+  segIndicator($(".auth-tabs"));
+  // The form itself does not fade in: the username field is focused at once, and a focused
+  // field (caret, typed characters, focus ring) must never sit inside something at opacity 0.
+  const form = $("#auth-form");
+  stagger([...$(".auth-box").children].filter((c) => c !== form), { start: 60, step: 50, y: 14, duration: DUR.enter });
+  $("#auth-username").focus();
 }
+
+// The sign-in art is a live network: the pointer stimulates it, a press fires a volley.
+// It idles when the tab is hidden.
+(() => {
+  const art = $(".auth-art");
+  const at = (e) => { const r = $("#auth-net").getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  if (finePointer) {
+    art.addEventListener("pointermove", (e) => { if (authNet && !isReduced()) authNet.setPointer(...at(e)); });
+    art.addEventListener("pointerleave", () => { if (authNet) authNet.setPointer(null); });
+  }
+  art.addEventListener("pointerdown", (e) => { if (authNet) authNet.pulseAt(...at(e)); });
+  document.addEventListener("visibilitychange", () => {
+    if (!authNet || authEl.hidden || isReduced()) return;
+    if (document.hidden) authNet.stop(); else authNet.start();
+  });
+})();
+
+// prefers-reduced-motion switched on mid-session: live traces freeze on their current frame,
+// the sign-in field stops on a still frame, a flight in progress is dropped. Switched off: the
+// sign-in field resumes (traces stay still until their page is rendered again).
+onReducedChange((on) => {
+  if (on) {
+    for (const t of liveTraces) t.freeze();
+    flipDrop(0);
+  }
+  if (authNet) {
+    authNet.setReduced(on);
+    if (!on && !authEl.hidden && !document.hidden) authNet.start();
+  }
+});
 
 // Hide "Create account" when the server says registration is closed (capabilities).
 async function applyRegistrationPolicy() {
@@ -323,6 +481,7 @@ async function applyRegistrationPolicy() {
 }
 
 function setAuthMode(mode) {
+  const changed = mode !== authMode;
   authMode = mode;
   const reg = mode === "register";
   $("#tab-login").setAttribute("aria-selected", String(!reg));
@@ -335,6 +494,11 @@ function setAuthMode(mode) {
   $("#auth-submit").textContent = reg ? "Create account" : "Sign in";
   $("#auth-password").setAttribute("autocomplete", reg ? "new-password" : "current-password");
   $("#auth-error").replaceChildren();
+  if (changed) {
+    enter($("#auth-title"), { y: 8, duration: DUR.view });
+    enter($("#auth-sub"), { y: 6, duration: DUR.view, delay: 40 });
+    if (reg) enter($("#field-display"), { y: -6, duration: DUR.view, delay: 60 });
+  }
 }
 $("#tab-login").addEventListener("click", () => setAuthMode("login"));
 $("#tab-register").addEventListener("click", () => setAuthMode("register"));
@@ -390,6 +554,8 @@ function showShell() {
   if (authNet) authNet.stop();
   shellEl.hidden = false;
   paintIdentity();
+  segIndicator($(".tabs"));
+  enter($(".topbar"), { y: -8, duration: DUR.enter });
   route(); // loads capabilities too
 }
 
@@ -407,7 +573,10 @@ const menu = $("#account-menu");
 function setMenu(open) {
   menu.hidden = !open;
   avatarBtn.setAttribute("aria-expanded", String(open));
-  if (open) menu.querySelector("[role=menuitem]").focus();
+  if (open) {
+    if (!isReduced()) menu.animate([{ opacity: 0, transform: "translate3d(0, -6px, 0) scale(0.97)" }, { opacity: 1, transform: "none" }], { duration: DUR.ui, easing: EASE.out });
+    menu.querySelector("[role=menuitem]").focus();
+  }
 }
 avatarBtn.addEventListener("click", () => setMenu(menu.hidden));
 document.addEventListener("click", (e) => {
@@ -514,6 +683,7 @@ function parseHash() {
 function route() {
   if (!state.me) return;
   clearTimers();
+  leaveRoute();
   routeGen++;
   $("#global-banner").replaceChildren();
   loadCaps();
@@ -522,13 +692,15 @@ function route() {
     const on = a.dataset.route === r.name || (r.name === "job" && a.dataset.route === "history");
     if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   });
-  view.replaceChildren();
+  if (r.name !== "job") flipDrop();
+  swapOut();
   window.scrollTo(0, 0);
   if (r.name === "new") renderNew(r.params);
   else if (r.name === "history") renderHistory();
   else if (r.name === "job" && r.id) renderJobPage(r.id);
   else if (r.name === "account") renderAccount();
   else renderMissing();
+  swapIn();
 }
 window.addEventListener("hashchange", route);
 
@@ -704,7 +876,12 @@ function renderNew(params) {
   const chips = h("div", { class: "chips", role: "group", "aria-label": "Example prompts" },
     CHIPS.map((c) => h("button", {
       type: "button", class: "chip", text: c,
-      onclick: () => { textarea.value = c; state.draft = c; sync(); textarea.focus(); },
+      onclick: () => {
+        textarea.value = c; state.draft = c; sync(); textarea.focus();
+        composer.classList.remove("inject");
+        void composer.offsetWidth; // restart the glow pulse on repeated picks
+        composer.classList.add("inject");
+      },
     })));
 
   const advanced = h("section", { class: "advanced", id: "advanced", hidden: true, "aria-label": "Manual plan" });
@@ -722,6 +899,14 @@ function renderNew(params) {
       composer, chips, capsSlot, advanced, parseSlot, planSlot, runSlot),
     recent);
   paintCapsNotice(capsSlot);
+  segIndicator(langSeg);
+  const createTitle = view.querySelector(".create-title");
+  if (!isReduced()) {
+    splitLines(createTitle);
+    createTitle.classList.add("split-reveal");
+    requestAnimationFrame(() => createTitle.classList.add("in"));
+  }
+  composer.addEventListener("animationend", () => composer.classList.remove("inject"));
 
   function sync() {
     state.draft = textarea.value;
@@ -741,6 +926,7 @@ function renderNew(params) {
     advToggle.setAttribute("aria-expanded", String(open));
     advToggle.classList.toggle("on", open);
     if (open && !advanced.childElementCount) buildAdvanced(advanced, showPlan);
+    if (open) enter(advanced, { y: 10, duration: DUR.enter });
   });
 
   composer.addEventListener("submit", async (e) => {
@@ -753,16 +939,34 @@ function renderNew(params) {
     }
     const lang = state.lang === "auto" ? detectLang(prompt) : state.lang;
     genBtn.disabled = true;
-    planSlot.replaceChildren();
+    genBtn.setAttribute("aria-busy", "true");
     runSlot.replaceChildren();
     const started = performance.now();
     const elapsed = h("span", { class: "mono", text: "0 s" });
-    const drafting = h("div", { class: "drafting" },
-      h("div", { class: "drafting-raster", "aria-hidden": "true" }, Array.from({ length: 7 }, () => h("span"))),
-      h("div", null,
-        h("p", { class: "drafting-title", text: "Drafting a plan from your description" }),
-        h("p", { class: "drafting-sub" }, "Matching neuron groups and checking limits · ", elapsed)));
-    parseSlot.replaceChildren(drafting);
+    const traceCanvas = h("canvas", { class: "drafting-trace", "aria-hidden": "true" });
+    // The draft is a plan-card-shaped plate in the plan's own slot, so the real card replaces it
+    // in the same place (the page does not jump) and the user is already looking there.
+    const skelBar = (cls) => h("div", { class: `skel ${cls}` });
+    const drafting = h("article", { class: "drafting plan-skel", "aria-hidden": "true" },
+      h("header", { class: "drafting-head" },
+        traceCanvas,
+        h("div", null,
+          h("p", { class: "drafting-title", text: "Drafting a plan from your description" }),
+          h("p", { class: "drafting-sub" }, "Matching neuron groups and checking limits · ", elapsed))),
+      skelBar("skel-quote"),
+      h("div", { class: "skel-sentence" }, skelBar("skel-sent"), skelBar("skel-sent short")),
+      h("div", { class: "spec-grid" }, Array.from({ length: 8 }, () => h("div", { class: "spec" }, skelBar("skel-dt"), skelBar("skel-dd")))),
+      h("div", { class: "skel-actions" }, skelBar("skel-input"), skelBar("skel-btn")));
+    planSlot.replaceChildren(drafting);
+    // the persistent live region announces the wait (the plate itself is decorative)
+    parseSlot.replaceChildren(h("p", { class: "sr-only", text: "Drafting a plan from your description…" }));
+    // three live membrane traces: the planner "thinking" (stops itself once this card is gone)
+    trace(traceCanvas, { rows: 3, activity: 0.4, noise: 1.3, seed: hashString(prompt) });
+    enter(drafting, { y: 8, duration: DUR.view });
+    // Give the result the stage: if the plate (and the card that will replace it) would not fit
+    // below the composer, bring it up under the top bar.
+    const dr = drafting.getBoundingClientRect();
+    if (dr.top < 72 || dr.top + 540 > window.innerHeight) drafting.scrollIntoView({ behavior: isReduced() ? "auto" : "smooth", block: "start" });
     const tick = setInterval(() => { elapsed.textContent = `${Math.round((performance.now() - started) / 1000)} s`; }, 500);
     let parsed;
     try {
@@ -770,20 +974,23 @@ function renderNew(params) {
     } catch (err) {
       clearInterval(tick);
       if (gen !== routeGen) return;
+      planSlot.replaceChildren();
       const titles = { 502: "The planner failed on this request", 503: "The planner is busy", 429: "Planner limit reached", 401: "You are signed out" };
       parseSlot.replaceChildren(errorBanner(titles[err.status] || "Could not generate a plan", err, [
         h("button", { class: "btn btn-sm", type: "button", text: "Try again", onclick: () => composer.requestSubmit() }),
-        h("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Use Advanced", onclick: () => { if (advanced.hidden) advToggle.click(); advanced.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" }); } }),
+        h("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Use Advanced", onclick: () => { if (advanced.hidden) advToggle.click(); advanced.scrollIntoView({ behavior: isReduced() ? "auto" : "smooth", block: "start" }); } }),
       ]));
       return;
     } finally {
       clearInterval(tick);
       genBtn.disabled = false;
+      genBtn.removeAttribute("aria-busy");
     }
     if (gen !== routeGen) { storeParse(parsed, prompt); return; }
     try {
       handleParse(parsed, prompt);
     } catch (err) {
+      planSlot.replaceChildren();
       parseSlot.replaceChildren(errorBanner("The plan could not be displayed", err));
     }
   });
@@ -796,6 +1003,7 @@ function renderNew(params) {
 
   function handleParse(data, prompt) {
     parseSlot.replaceChildren();
+    planSlot.replaceChildren(); // the drafting plate; a ready plan paints its card here below
     if (!data || typeof data.status !== "string") {
       parseSlot.replaceChildren(banner("error", "The planner answered in an unexpected shape", "No status field in the response from /api/v1/plans/parse."));
       return;
@@ -806,6 +1014,7 @@ function renderNew(params) {
         h("p", { class: "notice-msg", text: data.message || "The planner needs more information." }),
         (data.unresolved_fields || []).length ? h("div", { class: "tags" }, data.unresolved_fields.map((f) => h("span", { class: "tag mono", text: f }))) : null,
         h("p", { class: "muted small", text: "Add the missing details to your description and generate again." })));
+      enter(parseSlot.firstChild, { y: 10 });
       textarea.focus();
       return;
     }
@@ -814,6 +1023,7 @@ function renderNew(params) {
         h("p", { class: "eyebrow", text: "Outside what the simulator does" }),
         h("p", { class: "notice-msg", text: data.message || "This request cannot be expressed as a stimulation experiment." }),
         h("p", { class: "muted small", text: "FlyLab stimulates and silences neuron groups and reads out spike rates. Whole-animal behaviour such as walking or flight is out of scope." })));
+      enter(parseSlot.firstChild, { y: 10 });
       return;
     }
     if (data.status !== "ready") {
@@ -829,10 +1039,11 @@ function renderNew(params) {
 
   function showPlan(p) {
     state.lastPlan = p;
-    paintPlan();
+    paintPlan(true);
   }
 
-  function paintPlan() {
+  // fresh=true: a newly drafted plan assembles itself; a repaint (group names arrived) does not.
+  function paintPlan(fresh = false) {
     const p = state.lastPlan;
     if (!p) return;
     if (!state.groups && !state.groupsError) loadGroups().then(() => { if (gen === routeGen && state.lastPlan === p) paintPlan(); }).catch(() => { if (gen === routeGen && state.lastPlan === p) paintPlan(); });
@@ -841,13 +1052,21 @@ function renderNew(params) {
         planId: p.planId, prompt: p.prompt, title, slot: runSlot, key,
         onCreated: (job) => {
           runSlot.replaceChildren();
-          mountJob(runSlot, job, { compact: true });
+          mountJob(runSlot, job, { compact: true, onStatus: (j, prev) => { if (j.status !== prev) refreshRecentCard(recent, j); } });
           loadRecent(recent, gen);
-          runSlot.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
+          runSlot.scrollIntoView({ behavior: isReduced() ? "auto" : "smooth", block: "start" });
         },
       }),
     }));
-    if (!reduced) planSlot.firstChild.animate([{ opacity: 0, transform: "translateY(10px)" }, { opacity: 1, transform: "none" }], { duration: 420, easing: "cubic-bezier(.2,.7,.1,1)" });
+    if (!fresh || isReduced()) return;
+    // The card assembles field by field where the user can see it: at once when it is in view,
+    // otherwise (held invisible) the moment a third of it scrolls into view.
+    const card = planSlot.firstChild;
+    const r = card.getBoundingClientRect();
+    if (r.top < window.innerHeight * 0.75 && r.bottom > 0) { assemble(card); return; }
+    card.classList.add("pending-assemble");
+    onLeave(() => io && io.disconnect());
+    const io = onceVisible(card, () => { card.classList.remove("pending-assemble"); assemble(card); }, { rootMargin: "0px", threshold: 0.35 });
   }
 
   if (state.lastPlan) paintPlan();
@@ -1004,7 +1223,7 @@ function buildAdvanced(root, onPlan) {
         const { data } = await api("/api/v1/plans/validate", { method: "POST", body: plan, gate: false });
         if (!data || !data.plan_id) throw new ApiError(200, "BAD_SHAPE", "POST /api/v1/plans/validate answered without a plan_id");
         onPlan(normalizePlan(data, "manual", ""));
-        $(".plan-slot").scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
+        $(".plan-slot").scrollIntoView({ behavior: isReduced() ? "auto" : "smooth", block: "start" });
       } catch (err) {
         status.replaceChildren(errorBanner("The plan did not pass validation", err));
       } finally {
@@ -1021,7 +1240,7 @@ function buildAdvanced(root, onPlan) {
 /* ---------- recent strip on #/new ---------- */
 async function loadRecent(root, gen) {
   root.replaceChildren(h("div", { class: "recent-head" }, h("h2", { class: "section-title", id: "recent-title", text: "Recent runs" }), h("a", { href: "#/history", class: "link", text: "Open library →" })));
-  const grid = h("div", { class: "recent-grid" });
+  const grid = h("div", { class: "recent-grid" }, Array.from({ length: 3 }, () => skelCard(4 / 3)));
   root.append(grid);
   try {
     const { data } = await api("/api/v1/jobs?limit=6&offset=0");
@@ -1031,12 +1250,24 @@ async function loadRecent(root, gen) {
       grid.replaceWith(h("p", { class: "muted small recent-empty", text: "Your runs will collect here — each one gets its own raster fingerprint." }));
       return;
     }
-    jobs.forEach((j) => grid.append(jobCard(j, { aspect: 4 / 3 })));
+    grid.replaceChildren(...jobs.map((j) => jobCard(j, { aspect: 4 / 3 })));
+    stagger(grid.children, { step: STAGGER, y: 16, duration: 640 });
     requestAnimationFrame(() => grid.querySelectorAll("canvas").forEach((c) => c._draw && c._draw()));
   } catch (err) {
     if (gen !== routeGen) return;
     grid.replaceWith(errorBanner("Recent runs could not be loaded", err));
   }
+}
+
+// The in-flight run's entry in "Recent runs" follows its status (queued -> running -> done), so
+// the strip never shows a stale "Queued" next to a run that is visibly running.
+function refreshRecentCard(root, job) {
+  const href = `#/job/${encodeURIComponent(job.job_id)}`;
+  const old = [...root.querySelectorAll(".job-card")].find((a) => a.getAttribute("href") === href);
+  if (!old) return;
+  const card = jobCard(job, { aspect: 4 / 3 });
+  old.replaceWith(card);
+  requestAnimationFrame(() => { const c = card.querySelector("canvas"); if (c && c._draw) c._draw(); });
 }
 
 /* ================================================================== */
@@ -1056,7 +1287,7 @@ function thumbFor(job) {
 
 function jobCard(job, { aspect }) {
   const c = h("canvas", { "aria-hidden": "true", style: `aspect-ratio:${aspect}` });
-  c._draw = () => drawRasterThumb(c, thumbFor(job));
+  c._draw = () => { drawRasterThumb(c, thumbFor(job)); c.classList.add("drawn"); };
   const s = job.summary;
   const title = job.title || job.prompt || planShort(job.plan) || job.job_id;
   const counts = s
@@ -1065,7 +1296,9 @@ function jobCard(job, { aspect }) {
     : null;
   const errs = [job.plan_error ? `Plan unreadable: ${job.plan_error}` : null, job.summary_error ? `Summary unreadable: ${job.summary_error}` : null].filter(Boolean);
   const marker = job.plan_error ? "Plan unreadable" : "Summary unreadable";
-  return h("a", { class: `job-card${errs.length ? " has-error" : ""}`, href: `#/job/${encodeURIComponent(job.job_id)}`, "aria-label": `${title} — ${STATUS_LABEL[job.status] || job.status}${errs.length ? ` — ${marker}` : ""}` },
+  // a plain click flies the thumbnail into the run page (modified clicks open normally)
+  const onclick = (e) => { if (e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) flipCapture(c); };
+  return h("a", { class: `job-card${errs.length ? " has-error" : ""}`, href: `#/job/${encodeURIComponent(job.job_id)}`, onclick, "aria-label": `${title} — ${STATUS_LABEL[job.status] || job.status}${errs.length ? ` — ${marker}` : ""}` },
     h("div", { class: "job-thumb" }, c,
       h("div", { class: "thumb-top" }, statusChip(job.status)),
       errs.length ? h("span", { class: "thumb-error", title: errs.join("\n"), text: errs.length > 1 ? "Plan + summary unreadable" : marker }) : null),
@@ -1133,6 +1366,14 @@ function renderHistory() {
       h("div", { class: "lib-tools" }, seg, h("a", { class: "btn btn-primary btn-sm", href: "#/new", text: "New experiment" }))),
     grid, foot, sentinel));
   let masonry = new Masonry(grid);
+  onLeave(() => masonry.disconnect());
+  segIndicator(seg);
+  if (!isReduced()) {
+    const t = view.querySelector(".page-title");
+    splitLines(t);
+    t.classList.add("split-reveal");
+    requestAnimationFrame(() => t.classList.add("in"));
+  }
 
   seg.addEventListener("click", (e) => {
     const b = e.target.closest("[data-v]");
@@ -1152,7 +1393,10 @@ function renderHistory() {
     if (inflight || (total !== null && offset >= total)) return;
     const mine = { filter };
     inflight = mine;
-    foot.replaceChildren(h("div", { class: "launching" }, h("span", { class: "spinner", "aria-hidden": "true" }), h("span", { text: offset ? "Loading more runs…" : "Loading your runs…" })));
+    // skeleton cards hold the space the incoming page will take; the text stays for screen readers
+    foot.replaceChildren(h("div", { class: "lib-loading" },
+      skelGrid(offset ? 4 : 8),
+      h("div", { class: "launching" }, h("span", { class: "spinner", "aria-hidden": "true" }), h("span", { text: offset ? "Loading more runs…" : "Loading your runs…" }))));
     const myFilter = filter;
     try {
       const q = `/api/v1/jobs?limit=24&offset=${offset}${filter ? `&status=${encodeURIComponent(filter)}` : ""}`;
@@ -1160,12 +1404,14 @@ function renderHistory() {
       if (gen !== routeGen || inflight !== mine || myFilter !== filter) return;
       if (!data || !Array.isArray(data.jobs)) throw new ApiError(200, "BAD_SHAPE", "GET /api/v1/jobs did not return a jobs array");
       total = typeof data.total === "number" ? data.total : offset + data.jobs.length + (data.jobs.length === 24 ? 1 : 0);
-      for (const j of data.jobs) {
+      data.jobs.forEach((j, k) => {
         const aspect = [4 / 3, 1, 4 / 5, 16 / 10][hashString(j.job_id) % 4];
         const card = jobCard(j, { aspect });
         const c = card.querySelector("canvas");
         masonry.add(card, aspect, () => c._draw());
-      }
+        // every page (first or infinite-scroll) arrives as a short cascade
+        enter(card, { delay: Math.min(k, 12) * 45, y: 18, duration: 640 });
+      });
       offset += data.jobs.length;
       if (data.jobs.length === 0) total = offset;
       countEl.textContent = total === 0 ? "" : `${fmtInt(offset)} of ${fmtInt(total)} run${total === 1 ? "" : "s"}${filter ? ` · ${STATUS_LABEL[filter] || filter}` : ""}`;
@@ -1188,6 +1434,7 @@ function renderHistory() {
     if (entries[0].isIntersecting && total !== null && offset < total) load();
   }, { rootMargin: "600px 0px" });
   io.observe(sentinel);
+  onLeave(() => io.disconnect());
   load();
 }
 
@@ -1209,10 +1456,12 @@ const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 
 function mountJob(root, job, { compact = false, onStatus = null } = {}) {
   const gen = routeGen;
-  const stageList = h("ol", { class: "stages", "aria-label": "Run stages" }, STAGES.map((s) => h("li", { "data-stage": s, text: s })));
+  // A run that is already over when mounted assembles its stage dots in sequence.
+  const stageList = h("ol", { class: "stages", "aria-label": "Run stages" }, STAGES.map((s, i) => h("li", { "data-stage": s, text: s, style: TERMINAL.has(job.status) ? `--si:${i}` : null })));
   const bar = h("div", { class: "bar" });
   const pct = h("span", { class: "mono pct" });
   const elapsed = h("span", { class: "mono" });
+  const pulseCanvas = h("canvas", { class: "run-pulse", "aria-hidden": "true" });
   const chipSlot = h("span");
   const cancelBtn = h("button", { class: "btn btn-ghost btn-sm", type: "button", text: "Cancel run" });
   const msg = h("div", { class: "run-msg", "aria-live": "polite" });
@@ -1221,14 +1470,50 @@ function mountJob(root, job, { compact = false, onStatus = null } = {}) {
   const results = h("div", { class: "results-slot" });
   const live = h("div", { class: "live" },
     h("div", { class: "progress", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-label": "Run progress" }, bar),
-    h("div", { class: "live-row" }, stageList, h("span", { class: "live-nums" }, pct, elapsed)));
+    h("div", { class: "live-row" }, stageList, h("span", { class: "live-nums" }, pulseCanvas, pct, elapsed)));
   const head = h("header", { class: "run-head" },
     h("div", null,
       h("p", { class: "eyebrow" }, compact ? "Run " : "", h("a", { class: "mono", href: `#/job/${encodeURIComponent(job.job_id)}`, text: job.job_id })),
       compact ? h("p", { class: "run-title", text: job.title || job.prompt || planShort(job.plan) || "Untitled run" }) : null),
     h("div", { class: "run-head-end" }, chipSlot, cancelBtn));
-  const panel = h("article", { class: "run-card" }, head, live, actionMsg, msg, results);
+  // A run started from Create shows its own fingerprint developing while it runs (blur, exposure
+  // and a reveal edge that follow progress; CSS transitions only). On success the final pixels,
+  // the same ones its library card and run page show, settle into focus before the results.
+  const art = compact ? h("canvas", { "aria-hidden": "true" }) : null;
+  const artBox = compact ? h("div", { class: "run-art" }, art) : null;
+  const panel = compact
+    ? h("article", { class: "run-card compact" }, head, h("div", { class: "run-body" }, artBox, h("div", { class: "run-side" }, live, actionMsg, msg)), results)
+    : h("article", { class: "run-card" }, head, live, actionMsg, msg, results);
   root.append(panel);
+  // Live activity: a two-unit spiking trace whose drive follows progress; a finished run shows
+  // a still frame (no loop at all).
+  const over = TERMINAL.has(job.status);
+  const pulse = trace(pulseCanvas, { rows: 2, activity: over ? 0.6 : 0.1, reduced: over, seed: hashString(job.job_id) });
+  let artFinal = false;
+  function develop(j, p) {
+    if (!art) return;
+    if (!TERMINAL.has(j.status)) {
+      if (!art._provisional) {
+        const plan = j.plan || {};
+        const rate = plan.activation && plan.activation[0] ? plan.activation[0].rate_hz : null;
+        // a provisional exposure (the run's own seed, a typical spike count) that the final
+        // fingerprint replaces when the run is done
+        drawRasterThumb(art, { seed: `${j.job_id}|develop`, a: 1500, b: plan.experiment_type === "compare_silencing" ? 1500 : null, status: "succeeded", rate });
+        art._provisional = true;
+      }
+      artBox.classList.add("developing");
+      artBox.style.setProperty("--dev", (j.status === "queued" ? 0 : p / 100).toFixed(3));
+      return;
+    }
+    if (artFinal) return;
+    artFinal = true;
+    drawRasterThumb(art, thumbFor(j));
+    artBox.classList.remove("developing");
+    artBox.style.removeProperty("--dev");
+    if (j.status === "succeeded" && !isReduced()) {
+      art.animate([{ transform: "scale(1.02)" }, { transform: "none" }], { duration: 520, delay: 420, easing: EASE.out });
+    }
+  }
   // A panel replaced by a newer run (or a re-render) stops polling: nobody can see it.
   const alive = () => gen === routeGen && panel.isConnected;
 
@@ -1250,11 +1535,17 @@ function mountJob(root, job, { compact = false, onStatus = null } = {}) {
     paint(data);
   });
 
+  let lastStatus;
   function paint(j) {
     current = { ...current, ...j };
+    const prevStatus = lastStatus;
+    lastStatus = current.status;
     chipSlot.replaceChildren(statusChip(current.status));
     const p = Math.max(0, Math.min(100, Number(current.progress_pct) || 0));
-    bar.style.width = `${current.status === "succeeded" ? 100 : p}%`;
+    bar.style.transform = `scaleX(${(current.status === "succeeded" ? 100 : p) / 100})`;
+    develop(current, p);
+    if (TERMINAL.has(current.status)) pulse.freeze();
+    else pulse.setActivity(current.status === "queued" ? 0.05 : 0.2 + 0.8 * (p / 100));
     live.querySelector(".progress").setAttribute("aria-valuenow", String(Math.round(p)));
     pct.textContent = `${Math.round(current.status === "succeeded" ? 100 : p)}%`;
     const idx = STAGES.indexOf(current.stage);
@@ -1268,7 +1559,7 @@ function mountJob(root, job, { compact = false, onStatus = null } = {}) {
     cancelBtn.hidden = TERMINAL.has(current.status) || current.status === "cancelling";
     if (TERMINAL.has(current.status)) actionMsg.replaceChildren();
     panel.dataset.status = current.status;
-    if (onStatus) onStatus(current);
+    if (onStatus) onStatus(current, prevStatus);
   }
 
   async function poll() {
@@ -1281,7 +1572,7 @@ function mountJob(root, job, { compact = false, onStatus = null } = {}) {
       paint(data);
       if (data.status === "succeeded") {
         live.classList.add("finished");
-        renderResults(results, current);
+        renderResults(results, current, { delay: art && !isReduced() ? 540 : 0 });
       } else if (data.status === "failed") {
         live.classList.add("finished");
         msg.replaceChildren(banner("error", "The simulation failed", current.error_message || "The worker reported a failure without a message.", { meta: current.error_code || null }));
@@ -1318,10 +1609,11 @@ function mountJob(root, job, { compact = false, onStatus = null } = {}) {
   return panel;
 }
 
-async function renderResults(root, job) {
+async function renderResults(root, job, { delay = 0 } = {}) {
   const gen = routeGen;
   const id = encodeURIComponent(job.job_id);
   root.replaceChildren(h("div", { class: "launching" }, h("span", { class: "spinner", "aria-hidden": "true" }), h("span", { text: "Loading results…" })));
+  enter(root.firstChild, { y: 6, duration: DUR.view });
   if (job.summary_error) {
     root.replaceChildren(banner("error", "This run’s summary file is corrupted", job.summary_error, { meta: "summary.json could not be read — totals below may be missing" }));
   }
@@ -1370,16 +1662,19 @@ async function renderResults(root, job) {
           h("td", { class: "num mono", text: fmtHz(r.rate_A_hz) }),
           hasB ? h("td", { class: "num mono", text: fmtHz(r.rate_B_hz) }) : null,
           hasB ? h("td", { class: "num mono delta" },
-            h("span", { class: "dbar", "aria-hidden": "true" }, h("i", { style: `${r.delta_hz < 0 ? "right:50%" : "left:50%"};width:${(Math.abs(r.delta_hz || 0) / maxAbs) * 50}%` })),
+            h("span", { class: "dbar", "aria-hidden": "true" }, h("i", { style: `${r.delta_hz < 0 ? "right:50%;transform-origin:right center" : "left:50%;transform-origin:left center"};width:${(Math.abs(r.delta_hz || 0) / maxAbs) * 50}%;--ri:${ro.indexOf(r)}` })),
             h("span", { text: fmtSigned(r.delta_hz) })) : null);
       }))))
     : h("p", { class: "muted small", text: "This plan had no readout neurons, so there is no readout table." });
 
   // raster
-  const rasterCanvas = h("canvas", { class: "raster", role: "img", "aria-label": "Spike raster: one row per neuron, condition A in magenta on top, condition B in green below" });
+  // The raster is readable without a mouse: tap a row, or focus it and step with the arrow keys.
+  const rasterCanvas = h("canvas", { class: "raster", role: "img", tabindex: "0", "aria-describedby": "raster-row",
+    "aria-label": "Spike raster: one row per neuron, condition A in magenta on top, condition B in green below. Tap a row, or use the up and down arrow keys, to read a neuron's spike counts." });
   const tip = h("div", { class: "tip", hidden: true, role: "tooltip" });
+  const rowLive = h("p", { class: "sr-only", id: "raster-row", "aria-live": "polite" });
   const rasterNote = h("p", { class: "muted small raster-note" });
-  const rasterBody = h("div", { class: "raster-wrap" }, rasterCanvas, tip);
+  const rasterBody = h("div", { class: "raster-wrap" }, rasterCanvas, tip, rowLive);
   const rasterPanel = h("section", { class: "panel" },
     h("div", { class: "panel-head" },
       h("h3", { class: "panel-title", text: "Raster" }),
@@ -1400,12 +1695,16 @@ async function renderResults(root, job) {
       dlBtn("report.md", `/api/v1/jobs/${id}/artifacts/report.md`, "report.md")),
     dlStatus);
 
+  const readoutPanel = h("section", { class: "panel" }, h("div", { class: "panel-head" }, h("h3", { class: "panel-title", text: "Readout neurons" })), table);
   root.append(h("section", { class: "results" },
     tiles,
-    h("div", { class: "results-grid" },
-      h("section", { class: "panel" }, h("div", { class: "panel-head" }, h("h3", { class: "panel-title", text: "Readout neurons" })), table),
-      rasterPanel),
+    h("div", { class: "results-grid" }, readoutPanel, rasterPanel),
     downloads));
+  // Results reveal in reading order: tiles (numbers roll up to the totals), panels, downloads.
+  stagger(tiles.children, { start: delay, step: 70, y: 14, duration: DUR.enter });
+  tiles.querySelectorAll(".tile-value").forEach((v, i) => countUp(v, { duration: 1100, delay: delay + 120 + i * 70 }));
+  stagger([readoutPanel, rasterPanel, downloads], { start: delay + 220, step: 90, y: 18, duration: DUR.enter });
+  if (!isReduced()) stagger(readoutPanel.querySelectorAll("tbody tr"), { start: delay + 360, step: 40, y: 0, duration: 500 });
 
   // spikes for the raster: each condition is fetched on its own. rates.csv lists every A row
   // before any B row, so one unfiltered page would hold no B rows at all for a busy run.
@@ -1429,30 +1728,97 @@ async function renderResults(root, job) {
     const duration = Number(summary.duration_ms || (job.plan && job.plan.duration_ms) || 100);
     const draw = () => drawResultRaster(rasterCanvas, rows, { durationMs: duration, maxNeurons: rasterBody.clientWidth < 520 ? 32 : 60, compare: hasB && !missingB });
     let geo = draw();
+    drawIn(rasterCanvas, rasterBody, delay);
     const partial = conds.filter((c) => counts[c].got < counts[c].total).map((c) => `condition ${c}: first ${fmtInt(counts[c].got)} of ${fmtInt(counts[c].total)} rows`);
     rasterNote.textContent = `Showing the ${geo.shown} most active of ${fmtInt(geo.total)} neurons (${conds.map((c) => `${c}: ${fmtInt(counts[c].total)} neuron × trial rows`).join(", ")}). Each row shows that neuron’s spike count; tick positions inside the window are illustrative — exact spike times are in spikes.parquet in the ZIP.${partial.length ? ` Only part of the data is drawn (${partial.join("; ")}).` : ""}`;
     if (missingB) {
       rasterPanel.insertBefore(banner("error", "Condition B is missing from the raster",
         `The summary reports ${fmtInt(summary.total_spikes_B)} spikes in B, but rates.csv returned no B rows. Only condition A is drawn.`), rasterBody);
     }
-    new ResizeObserver(() => { geo = draw(); }).observe(rasterBody);
-    rasterCanvas.addEventListener("pointermove", (e) => {
-      const r = rasterCanvas.getBoundingClientRect();
-      const i = Math.floor((e.clientY - r.top - geo.top + 1) / geo.rowH);
+    // The observer's first callback arrives right after observe(): redraw only for a real width
+    // change, not a second full raster pass in the job page's first frames.
+    let drawnW = rasterBody.clientWidth;
+    const ro = new ResizeObserver(() => {
+      const w = rasterBody.clientWidth;
+      if (w === drawnW) return;
+      drawnW = w;
+      geo = draw();
+      if (sel >= geo.neurons.length) sel = geo.neurons.length - 1;
+      if (!tip.hidden && sel >= 0) showRow(sel, null, null);
+    });
+    ro.observe(rasterBody);
+    onLeave(() => ro.disconnect());
+    let sel = -1; // row shown by a tap or the keyboard (-1: none)
+    const rowText = (n) => `${n.readout ? "readout · " : ""}A ${fmtInt(n.A)} spikes${n.hasB ? ` · B ${fmtInt(n.B)}` : ""}`;
+    // x, y: where to put the tip, relative to the canvas; null = beside the row
+    function showRow(i, x, y) {
       const n = geo.neurons[i];
       if (!n) { tip.hidden = true; return; }
       tip.hidden = false;
-      tip.replaceChildren(
-        h("b", { class: "mono", text: n.root_id }),
-        h("span", { text: `${n.readout ? "readout · " : ""}A ${fmtInt(n.A)} spikes${n.hasB ? ` · B ${fmtInt(n.B)}` : ""}` }));
-      const x = Math.min(e.clientX - r.left + 14, r.width - 220);
-      tip.style.transform = `translate(${Math.max(0, x)}px, ${e.clientY - r.top + 12}px)`;
+      tip.replaceChildren(h("b", { class: "mono", text: n.root_id }), h("span", { text: rowText(n) }));
+      const w = rasterCanvas.clientWidth;
+      const rowY = geo.top + i * geo.rowH;
+      const tx = Math.max(0, Math.min((x === null ? 8 : x + 14), w - 220));
+      const ty = y === null ? rowY + geo.rowH + 6 : y + 12;
+      tip.style.transform = `translate(${tx}px, ${ty}px)`;
+    }
+    const rowAt = (clientY) => Math.floor((clientY - rasterCanvas.getBoundingClientRect().top - geo.top + 1) / geo.rowH);
+    rasterCanvas.addEventListener("pointermove", (e) => {
+      if (e.pointerType !== "mouse") return;
+      const r = rasterCanvas.getBoundingClientRect();
+      showRow(rowAt(e.clientY), e.clientX - r.left, e.clientY - r.top);
     });
-    rasterCanvas.addEventListener("pointerleave", () => { tip.hidden = true; });
+    rasterCanvas.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse" && sel < 0) tip.hidden = true; });
+    // touch / pen: a tap shows that row's counts until the next tap elsewhere
+    rasterCanvas.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse") return;
+      const r = rasterCanvas.getBoundingClientRect();
+      const i = rowAt(e.clientY);
+      if (!geo.neurons[i]) { tip.hidden = true; sel = -1; return; }
+      sel = i;
+      showRow(i, e.clientX - r.left, e.clientY - r.top);
+    });
+    const outside = (e) => { if (sel >= 0 && !rasterBody.contains(e.target)) { sel = -1; tip.hidden = true; } };
+    document.addEventListener("pointerdown", outside);
+    onLeave(() => document.removeEventListener("pointerdown", outside));
+    rasterCanvas.addEventListener("keydown", (e) => {
+      const last = geo.neurons.length - 1;
+      let i = sel;
+      if (e.key === "ArrowDown") i = Math.min(last, sel + 1);
+      else if (e.key === "ArrowUp") i = Math.max(0, sel < 0 ? 0 : sel - 1);
+      else if (e.key === "Home") i = 0;
+      else if (e.key === "End") i = last;
+      else if (e.key === "Escape") { sel = -1; tip.hidden = true; return; }
+      else return;
+      e.preventDefault();
+      sel = i;
+      showRow(i, null, null);
+      const n = geo.neurons[i];
+      rowLive.textContent = `Row ${i + 1} of ${last + 1}: neuron ${n.root_id}, ${rowText(n)}`;
+    });
+    rasterCanvas.addEventListener("blur", () => { sel = -1; tip.hidden = true; });
   } catch (err) {
     if (gen !== routeGen) return;
     rasterBody.replaceChildren(errorBanner("Spike data could not be loaded", err));
   }
+}
+
+// The raster records itself: a playhead sweeps left to right at constant speed (it is a time
+// axis, so the easing is linear) and the canvas is uncovered behind it.
+function drawIn(canvas, wrap, delay = 0) {
+  if (isReduced()) return;
+  const dur = 820;
+  canvas.animate([{ clipPath: "inset(0 100% 0 0)" }, { clipPath: "inset(0 0% 0 0)" }], { duration: dur, delay, easing: EASE.linear, fill: "backwards" });
+  const head = h("span", { class: "playhead", "aria-hidden": "true" });
+  wrap.append(head);
+  const w = canvas.clientWidth;
+  const fadeMs = 180; // the head reaches the right edge exactly when the reveal does, then fades
+  const a = head.animate([
+    { transform: "translateX(0px)", opacity: 1 },
+    { transform: `translateX(${w - 2}px)`, opacity: 1, offset: dur / (dur + fadeMs) },
+    { transform: `translateX(${w - 2}px)`, opacity: 0 },
+  ], { duration: dur + fadeMs, delay, easing: EASE.linear, fill: "both" });
+  a.onfinish = () => head.remove();
 }
 
 /* ================================================================== */
@@ -1464,7 +1830,17 @@ async function renderJobPage(jobId) {
   const gen = routeGen;
   const root = h("section", { class: "job-page" });
   view.append(h("a", { class: "back link", href: "#/history", text: "← Library" }), root);
-  root.append(h("div", { class: "launching" }, h("span", { class: "spinner", "aria-hidden": "true" }), h("span", { text: "Loading run…" })));
+  // Skeleton in the page's real geometry, so a thumbnail flying in from the library has a target.
+  const skelArt = h("div", { class: "job-art skel skel-art" });
+  root.append(h("div", { class: "launching sr-only" }, h("span", { text: "Loading run…" })),
+    h("div", { class: "job-hero", "aria-hidden": "true" },
+      skelArt,
+      h("div", { class: "job-info" },
+        h("div", { class: "skel skel-line short", style: "margin:0;width:30%" }),
+        h("div", { class: "skel skel-title" }),
+        h("div", { class: "skel skel-title", style: "width:55%" }),
+        h("div", { class: "skel skel-block" }))));
+  requestAnimationFrame(() => flipFly(skelArt));
   let job;
   try {
     const { data } = await api(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
@@ -1481,6 +1857,7 @@ async function renderJobPage(jobId) {
     } else {
       root.replaceChildren(errorBanner("The run could not be loaded", err, [h("button", { class: "btn btn-sm", type: "button", text: "Try again", onclick: route })]));
     }
+    flipDrop();
     return;
   }
   if (gen !== routeGen) return;
@@ -1503,7 +1880,11 @@ async function renderJobPage(jobId) {
   copyBtn.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(location.href);
+      // The inline live region (always in the DOM) carries the confirmation for screen readers;
+      // the toast is the visual echo.
       copyStatus.textContent = "Link copied";
+      later(() => { if (copyStatus.textContent === "Link copied") copyStatus.textContent = ""; }, 4000);
+      toast("Link copied");
     } catch (err) {
       copyStatus.textContent = `Copy failed: ${err.message}`;
     }
@@ -1531,7 +1912,7 @@ async function renderJobPage(jobId) {
     : banner("warn", "Plan details are missing for this run", "The server returned no plan and no plan_error for this run.");
   // A registry failure is shown as a banner on this page; group ids are displayed instead of names.
   const groupsErr = state.groups ? null : await loadGroups().then(() => null, (err) => err);
-  if (gen !== routeGen) return;
+  if (gen !== routeGen) { flipDrop(); return; }
   root.replaceChildren(...[
     groupsErr ? banner("warn", "Neuron group names could not be loaded; showing group ids", groupsErr.message) : null,
     h("div", { class: "job-hero" },
@@ -1552,7 +1933,11 @@ async function renderJobPage(jobId) {
     h("div", { class: "job-live" }),
     plan ? h("details", { class: "json" }, h("summary", { text: "Plan JSON" }), h("pre", { class: "mono", text: JSON.stringify(plan, null, 2) })) : null,
   ].filter(Boolean));
-  requestAnimationFrame(() => drawRasterThumb(art, thumbFor(job)));
+  // the page settles in after the skeleton: info column and the rest in a short cascade. During a
+  // flight from the library the art lands first (640 ms) and the text rises beside it.
+  const flying = Boolean(flip && !flip.landed);
+  requestAnimationFrame(() => { drawRasterThumb(art, thumbFor(job)); flipSettle(); });
+  stagger(root.querySelector(".job-info").children, { start: flying ? 480 : 0, step: 50, y: 10, duration: DUR.enter });
   mountJob(root.querySelector(".job-live"), job, { compact: false, onStatus });
 }
 
@@ -1565,7 +1950,9 @@ async function renderAccount() {
   const gen = routeGen;
   const root = h("section", { class: "account" });
   view.append(root);
-  root.append(h("div", { class: "launching" }, h("span", { class: "spinner", "aria-hidden": "true" }), h("span", { text: "Loading account…" })));
+  root.append(h("div", { class: "launching sr-only" }, h("span", { text: "Loading account…" })),
+    h("div", { class: "acct-head", "aria-hidden": "true" }, h("span", { class: "skel", style: "width:88px;height:88px;border-radius:50%" }), h("div", { class: "skel skel-title", style: "width:240px" })),
+    h("div", { class: "tiles", "aria-hidden": "true" }, Array.from({ length: 4 }, () => h("div", { class: "skel skel-tile" }))));
   try {
     const { data } = await api("/api/v1/me");
     if (gen !== routeGen) return;
@@ -1594,6 +1981,9 @@ async function renderAccount() {
       stat("Failed", fmtInt(st.failed), st.failed ? "tile-bad" : "")),
     h("p", { class: "muted" }, "Last run: ", h("span", { text: st.last_job_at ? `${relTime(st.last_job_at)} (${absTime(st.last_job_at)})` : "none yet" })),
     h("div", { class: "acct-actions" }, h("a", { class: "btn btn-primary", href: "#/history", text: "Open your library" }), signout));
+  stagger([...root.children].filter((c) => !c.classList.contains("tiles")), { step: 70, y: 12, duration: DUR.enter });
+  stagger(root.querySelectorAll(".tile"), { start: 120, step: 60, y: 12, duration: DUR.enter });
+  root.querySelectorAll(".tile-value").forEach((v, i) => countUp(v, { duration: 900, delay: 150 + i * 60 }));
 }
 
 /* ================================================================== */

@@ -64,8 +64,11 @@ function glowSprite(color, size = 48) {
 /* with a delay proportional to length, motor units are magenta.       */
 /* The pointer acts as a stimulation electrode.                        */
 /* ------------------------------------------------------------------ */
+/* Motion: on first start the network "ignites" — a wavefront leaves one point and every unit */
+/* fires its first spike as the front reaches it, so the field visibly comes alive in <1 s.    */
+/* The pointer leaves ripples; a press is a stronger stimulation pulse.                        */
 export class SpikingNet {
-  constructor(canvas, { ribbon = null, reduced = false, seed = 630 } = {}) {
+  constructor(canvas, { ribbon = null, reduced = false, seed = 630, ignite = false, igniteOrigin = null } = {}) {
     this.canvas = canvas;
     this.ribbon = ribbon;
     this.reduced = reduced;
@@ -75,6 +78,11 @@ export class SpikingNet {
     this.pointer = null;
     this.spikeLog = [];
     this.time = 0;
+    this.ripples = [];
+    this.lastRipple = null;
+    this.igniteWanted = ignite && !reduced;
+    this.igniteOrigin = igniteOrigin; // fractions of the canvas: { x: 0..1, y: 0..1 }
+    this.wave = null;
     this.sprites = {
       sensory: glowSprite(COLORS.green),
       inter: glowSprite(COLORS.cyan),
@@ -88,8 +96,9 @@ export class SpikingNet {
     const { w, h } = sizeCanvas(this.canvas);
     this.w = w; this.h = h;
     const R = rng(this.seed);
-    const narrow = w < 720;
-    const count = narrow ? 46 : Math.min(120, Math.round((w * h) / 14000));
+    // Phones and small tablets get a lighter field (fewer units, fewer pulses to draw).
+    const narrow = w <= 768;
+    const count = narrow ? 34 : Math.min(120, Math.round((w * h) / 14000));
     const nodes = [];
     for (let i = 0; i < count; i++) {
       // Bias toward the right half, where the plate image is dense; keep text side calm.
@@ -98,7 +107,7 @@ export class SpikingNet {
       const y = (0.06 + 0.88 * R()) * h;
       const roll = R();
       const type = roll < 0.14 ? "sensory" : roll > 0.9 ? "motor" : "inter";
-      nodes.push({ x, y, type, v: R() * 0.5, ref: 0, flash: 0, out: [], r: type === "inter" ? 1.3 + R() * 0.9 : 1.8 + R() * 1.1 });
+      nodes.push({ x, y, type, v: R() * 0.5, ref: 0, flash: 0, out: [], lit: 1, r: type === "inter" ? 1.3 + R() * 0.9 : 1.8 + R() * 1.1 });
     }
     // Directed edges to nearest neighbours (sparse, like a local connectome patch).
     const edges = [];
@@ -147,7 +156,46 @@ export class SpikingNet {
     if (this.ribbon) sizeCanvas(this.ribbon);
   }
 
-  setPointer(x, y) { this.pointer = x === null ? null : { x, y }; }
+  setPointer(x, y) {
+    this.pointer = x === null ? null : { x, y };
+    // Phones and small tablets (lite field) get no pointer ripples at all.
+    if (!this.pointer || this.reduced || this.w <= 768) return;
+    // A sparse trail of faint ripples, spaced in distance and time, so the electrode is visible.
+    // At most ~10 per second and 5 alive: each one is a stroke per frame under "lighter".
+    const lr = this.lastRipple;
+    const dt = lr ? this.time - lr.t : Infinity;
+    if (!lr || (Math.hypot(x - lr.x, y - lr.y) > 90 && dt > 0.1) || dt > 0.35) {
+      this.addRipple(x, y, 0.55);
+    }
+  }
+
+  addRipple(x, y, strength) {
+    this.lastRipple = { x, y, t: this.time };
+    this.ripples.push({ x, y, t: this.time, s: strength });
+    if (this.ripples.length > 5) this.ripples.shift();
+  }
+
+  // A press: strong ripple and a volley into the units under the electrode.
+  pulseAt(x, y) {
+    if (this.reduced) return;
+    this.addRipple(x, y, 1);
+    this.nodes.forEach((n, i) => {
+      if (n.lit && n.ref <= 0 && Math.hypot(n.x - x, n.y - y) < 120) this.fire(i);
+    });
+  }
+
+  // Ignition: every unit is dark until the wavefront from (ox, oy) reaches it, then fires.
+  ignite(ox, oy) {
+    let maxD = 1;
+    for (const n of this.nodes) maxD = Math.max(maxD, Math.hypot(n.x - ox, n.y - oy));
+    const dur = 0.85; // seconds for the front to cross the field
+    const speed = maxD / dur;
+    for (const n of this.nodes) {
+      n.lit = 0;
+      n.igniteT = this.time + 0.05 + Math.hypot(n.x - ox, n.y - oy) / speed;
+    }
+    this.wave = { x: ox, y: oy, t0: this.time, speed, maxD };
+  }
 
   fire(i) {
     const n = this.nodes[i];
@@ -160,8 +208,14 @@ export class SpikingNet {
     this.time += dt;
     const nodes = this.nodes;
     const p = this.pointer;
+    let dark = 0;
     for (let i = 0; i < nodes.length; i++) {
       const n = nodes[i];
+      if (!n.lit) {
+        if (this.time >= n.igniteT) { n.lit = 1; n.igniteT = undefined; this.fire(i); }
+        else dark++;
+        continue;
+      }
       n.flash = Math.max(0, n.flash - dt * 2.6);
       if (n.ref > 0) { n.ref -= dt; continue; }
       n.v -= n.v * dt / 0.12; // leak, tau = 120 ms of page time
@@ -180,14 +234,17 @@ export class SpikingNet {
       pu.t += (speed * dt) / Math.max(20, e.len);
       if (pu.t >= 1) {
         const tgt = nodes[e.to];
-        if (tgt.ref <= 0) {
+        if (tgt.lit && tgt.ref <= 0) {
           tgt.v += e.weight * 0.62;
           if (tgt.v < 0) tgt.v = 0;
           if (tgt.v >= 1) this.fire(e.to);
         }
       } else keep.push(pu);
     }
-    this.pulses = keep.length > 900 ? keep.slice(-900) : keep;
+    const cap = this.w <= 768 ? 360 : 900;
+    this.pulses = keep.length > cap ? keep.slice(-cap) : keep;
+    if (this.wave && !dark && this.time - this.wave.t0 > 1.6) this.wave = null;
+    if (this.ripples.length && this.time - this.ripples[0].t > 1) this.ripples = this.ripples.filter((r) => this.time - r.t <= 1);
     const horizon = this.time - 12;
     if (this.spikeLog.length && this.spikeLog[0].t < horizon) {
       this.spikeLog = this.spikeLog.filter((s) => s.t >= horizon);
@@ -197,9 +254,33 @@ export class SpikingNet {
   draw() {
     const { ctx, w, h } = sizeCanvas(this.canvas);
     ctx.clearRect(0, 0, w, h);
+    const wave = this.wave;
+    const waveAge = wave ? this.time - wave.t0 : 0;
     ctx.lineWidth = 0.6;
-    ctx.strokeStyle = "rgba(139,234,247,0.11)";
+    // Neurites fade up behind the ignition front.
+    const edgeA = wave ? Math.min(1, waveAge / 1.1) : 1;
+    ctx.strokeStyle = `rgba(139,234,247,${(0.11 * edgeA).toFixed(3)})`;
     ctx.stroke(this.edgePath);
+    if (wave) {
+      const r = waveAge * wave.speed;
+      const fade = Math.max(0, 1 - r / (wave.maxD * 1.05));
+      if (fade > 0 && r > 2) {
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        // a soft band of light (no hard rim): rises behind the front, peaks just inside it, fades out
+        const inner = Math.max(0, r - 90), outer = r + 24;
+        const g = ctx.createRadialGradient(wave.x, wave.y, inner, wave.x, wave.y, outer);
+        g.addColorStop(0, rgba(COLORS.green, 0));
+        g.addColorStop(0.62, rgba(COLORS.green, 0.06 * fade));
+        g.addColorStop(0.8, rgba(COLORS.cyan, 0.2 * fade));
+        g.addColorStop(1, rgba(COLORS.cyan, 0));
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(wave.x, wave.y, outer, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
 
     ctx.globalCompositeOperation = "lighter";
     for (const pu of this.pulses) {
@@ -223,6 +304,7 @@ export class SpikingNet {
       ctx.stroke();
     }
     for (const n of this.nodes) {
+      if (!n.lit) continue;
       const sprite = this.sprites[n.type];
       const base = n.type === "inter" ? 0.3 : 0.55;
       const s = n.r * 7 + n.flash * 40;
@@ -230,6 +312,25 @@ export class SpikingNet {
       ctx.drawImage(sprite, n.x - s / 2, n.y - s / 2, s, s);
     }
     ctx.globalAlpha = 1;
+    // Ripples: one thin stroke each; only a press (strength 1, rare) also gets the wide halo.
+    for (const rp of this.ripples) {
+      const age = this.time - rp.t;
+      const life = 0.55 + rp.s * 0.4;
+      if (age > life) continue;
+      const k = age / life;
+      const a = (1 - k) * (1 - k) * rp.s;
+      const rad = 6 + (1 - Math.pow(1 - k, 3)) * (60 + rp.s * 80);
+      ctx.beginPath();
+      ctx.arc(rp.x, rp.y, rad, 0, Math.PI * 2);
+      if (rp.s >= 1) {
+        ctx.strokeStyle = rgba(COLORS.green, a * 0.35); // halo
+        ctx.lineWidth = 10;
+        ctx.stroke();
+      }
+      ctx.strokeStyle = rgba([210, 255, 236], a * 0.85); // bright core
+      ctx.lineWidth = 1.2 + rp.s;
+      ctx.stroke();
+    }
     ctx.globalCompositeOperation = "source-over";
     if (this.ribbon) this.drawRibbon();
   }
@@ -268,6 +369,12 @@ export class SpikingNet {
       return;
     }
     if (this.running) return;
+    if (this.igniteWanted) {
+      this.igniteWanted = false;
+      if (this.ribbon && !this.spikeLog.length) this.prewarm(2.5);
+      const o = this.igniteOrigin || { x: 0.7, y: 0.45 };
+      this.ignite(o.x * this.w, o.y * this.h);
+    }
     this.running = true;
     this._last = 0;
     this._raf = requestAnimationFrame(this._frame);
@@ -278,10 +385,184 @@ export class SpikingNet {
     if (this._raf) cancelAnimationFrame(this._raf);
   }
 
+  // Live prefers-reduced-motion switch: on = stop the loop and leave one still frame (every unit
+  // lit, no ripples, no wavefront); off = the caller may start() the loop again.
+  setReduced(on) {
+    this.reduced = on;
+    if (!on) return;
+    this.stop();
+    this.igniteWanted = false;
+    this.wave = null;
+    this.ripples = [];
+    this.pointer = null;
+    for (const n of this.nodes) if (!n.lit) { n.lit = 1; n.igniteT = undefined; }
+    this.start();
+  }
+
+  // Simulate some history offline so the raster ribbon is already populated on arrival. Pulses
+  // and flashes are cleared afterwards: the visible field still starts dark for the ignition.
+  prewarm(seconds) {
+    const steps = Math.round(seconds * 60);
+    for (let i = 0; i < steps; i++) this.step(1 / 60);
+    this.pulses = [];
+    for (const n of this.nodes) { n.flash = 0; n.v *= 0.5; }
+  }
+
   resize() {
     this.build();
     this.spikeLog = [];
+    this.wave = null;
+    this.ripples = [];
     if (!this.running) this.draw();
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* SpikeTrace: a small live membrane trace (leaky integrate-and-fire), */
+/* one row per unit, scrolling right-to-left. Used as the "thinking"   */
+/* and "running" indicator in the app instead of a spinner.            */
+/* setActivity(0..1) raises the drive, so the firing rate ramps up.    */
+/* One rAF loop per visible trace; idles offscreen, in hidden tabs,    */
+/* and stops for good once the canvas leaves the document.             */
+/* ------------------------------------------------------------------ */
+export class SpikeTrace {
+  constructor(canvas, { rows = 2, activity = 0.35, reduced = false, seed = 7, speed = 52, colors = null, noise = 0.9 } = {}) {
+    this.canvas = canvas;
+    this.rowsN = rows;
+    this.reduced = reduced;
+    this.speed = speed; // px of trace per second
+    this.activity = activity;
+    this.target = activity;
+    this.noise = noise;
+    this.R = rng(seed);
+    this.colors = colors || [COLORS.green, COLORS.cyan, COLORS.magenta];
+    this.rows = Array.from({ length: rows }, (_, i) => ({ v: this.R() * 0.6, ref: 0, buf: [], bias: (i - (rows - 1) / 2) * 0.06 }));
+    this.acc = 0;
+    this.onscreen = true;
+    this.running = false;
+    this.dead = false;
+    this._frame = this._frame.bind(this);
+    this.resize();
+    // Pre-roll so the trace is full (never an empty box) on its first frame.
+    this._advance(this.width);
+    this.draw();
+    if (reduced) { this.dead = true; return; } // a still frame; nothing to schedule or observe
+    this._vis = () => this._sync();
+    document.addEventListener("visibilitychange", this._vis);
+    if ("IntersectionObserver" in window) {
+      this.io = new IntersectionObserver((es) => { this.onscreen = es[es.length - 1].isIntersecting; this._sync(); });
+      this.io.observe(canvas);
+    }
+    this._sync();
+  }
+
+  resize() {
+    const { w, h } = sizeCanvas(this.canvas);
+    this.width = Math.max(10, Math.round(w));
+    this.height = h;
+    for (const r of this.rows) if (r.buf.length > this.width) r.buf.splice(0, r.buf.length - this.width);
+  }
+
+  setActivity(a) { this.target = Math.max(0, Math.min(1, a)); if (this.reduced) { this.activity = this.target; } }
+
+  // Simulate n new columns (1 column = 1 CSS px of trace).
+  _advance(n) {
+    const dtc = 1 / this.speed;
+    for (let c = 0; c < n; c++) {
+      this.activity += (this.target - this.activity) * 0.02;
+      for (const r of this.rows) {
+        let spike = false;
+        if (r.ref > 0) { r.ref -= dtc; r.v = 0; } else {
+          const drive = 0.82 + this.activity * 0.95 + r.bias;
+          const noise = (this.R() + this.R() + this.R() - 1.5) * this.noise * Math.sqrt(dtc);
+          r.v += ((drive - r.v) * dtc) / 0.16 + noise;
+          if (r.v < 0) r.v = 0;
+          if (r.v >= 1) { spike = true; r.v = 0; r.ref = 0.035; }
+        }
+        r.buf.push(spike ? -1 : r.v);
+        if (r.buf.length > this.width) r.buf.shift();
+      }
+    }
+  }
+
+  draw() {
+    const { ctx, w, h } = sizeCanvas(this.canvas);
+    ctx.clearRect(0, 0, w, h);
+    const bandH = h / this.rowsN;
+    this.rows.forEach((r, ri) => {
+      const top = ri * bandH + 2;
+      const base = top + bandH - 3;
+      const span = (bandH - 5) * 0.62;
+      const col = this.colors[ri % this.colors.length];
+      const x0 = w - r.buf.length;
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = "rgba(185,195,190,0.42)";
+      ctx.beginPath();
+      r.buf.forEach((v, i) => {
+        const y = base - (v < 0 ? 1 : v) * span;
+        if (i === 0) ctx.moveTo(x0 + i, y); else ctx.lineTo(x0 + i, y);
+      });
+      ctx.stroke();
+      ctx.globalCompositeOperation = "lighter";
+      r.buf.forEach((v, i) => {
+        if (v >= 0) return;
+        const x = x0 + i;
+        const age = (r.buf.length - i) / Math.max(1, w); // 0 at the head, 1 at the tail
+        ctx.fillStyle = rgba(col, 0.95 - age * 0.55);
+        ctx.fillRect(x - 0.5, top, 1.5, base - span - top + 1);
+        ctx.fillStyle = rgba(col, 0.35 - age * 0.25);
+        ctx.fillRect(x - 2, top, 4, 3);
+      });
+      ctx.globalCompositeOperation = "source-over";
+      const last = r.buf[r.buf.length - 1];
+      ctx.fillStyle = rgba(col, 1);
+      ctx.beginPath();
+      ctx.arc(w - 1.5, base - (last < 0 ? 1 : last) * span, 1.8, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+
+  _sync() {
+    if (this.dead || this.reduced) return;
+    if (!this.canvas.isConnected) { this.destroy(); return; } // its card was replaced
+    const want = this.onscreen && !document.hidden && !this.frozen;
+    if (want && !this.running) {
+      this.running = true;
+      this._last = 0;
+      this._raf = requestAnimationFrame(this._frame);
+    } else if (!want && this.running) {
+      this.running = false;
+      cancelAnimationFrame(this._raf);
+    }
+  }
+
+  _frame(ts) {
+    if (!this.running) return;
+    if (!this.canvas.isConnected) { this.destroy(); return; }
+    const last = this._last || ts;
+    const dt = Math.min(0.1, (ts - last) / 1000);
+    this._last = ts;
+    this.acc += dt * this.speed;
+    const n = Math.floor(this.acc);
+    if (n > 0) { this.acc -= n; this._advance(n); this.draw(); }
+    this._raf = requestAnimationFrame(this._frame);
+  }
+
+  // Stop animating and leave the current trace on screen (e.g. the run finished).
+  freeze() {
+    if (this.frozen) return;
+    this.frozen = true;
+    if (this.dead) return; // already still (reduced) or gone with its card
+    this.draw();
+    this.destroy();
+  }
+
+  destroy() {
+    this.dead = true;
+    this.running = false;
+    cancelAnimationFrame(this._raf);
+    if (this._vis) document.removeEventListener("visibilitychange", this._vis);
+    if (this.io) this.io.disconnect();
   }
 }
 

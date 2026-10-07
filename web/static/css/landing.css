@@ -38,11 +38,14 @@
   overflow: hidden;
   isolation: isolate;
 }
-.layers { position: absolute; inset: 0; z-index: -1; }
+/* The plates are sized from the viewport, not from the hero box: the hero's height follows the
+   headline's font metrics, so tying the layers to it made every web-font swap shift the whole
+   plate (CLS). Below 100svh the shade has already faded to page ink. */
+.layers { position: absolute; inset: 0 0 auto 0; height: 100vh; height: 100svh; z-index: -1; }
 .layer { position: absolute; will-change: transform; }
 .layer-far { inset: -5% -4%; }
-.layer-far img, .layer-far picture { width: 100%; height: 100%; }
-.layer-far img { object-fit: cover; object-position: 72% 50%; }
+.layer.layer-far img, .layer.layer-far picture { display: block; width: 100%; height: 100%; }
+.layer.layer-far img { object-fit: cover; object-position: 72% 50%; }
 .layer-net { inset: -3%; width: 106%; height: 106%; }
 .layer-mid {
   top: 9%; right: 34%;
@@ -58,7 +61,7 @@
   mix-blend-mode: screen;
   filter: blur(16px);
 }
-.layer img { width: 100%; height: auto; }
+.layer-mid img, .layer-near img { width: 100%; height: auto; }
 .hero-shade {
   position: absolute; inset: 0;
   background:
@@ -68,13 +71,13 @@
 
 .hero-copy {
   align-self: center;
-  padding: 120px var(--gutter) 40px;
+  padding: 88px var(--gutter) 16px;
   max-width: 900px;
 }
 .hero-eyebrow { margin: 0 0 22px; }
 .hero-title {
   margin: 0;
-  font-size: clamp(3.1rem, 8.4vw, 8.6rem);
+  font-size: clamp(3.1rem, min(8.4vw, 12.5vh), 8.6rem);
   max-width: 11ch;
   text-wrap: balance;
 }
@@ -237,7 +240,7 @@
   mask-image: radial-gradient(closest-side, #000 72%, transparent 100%);
 }
 .brain-img { position: absolute; inset: 0; will-change: transform; }
-.brain-img img, .brain-img picture { width: 100%; height: 100%; object-fit: cover; }
+.brain-img img, .brain-img picture { display: block; width: 100%; height: 100%; object-fit: cover; }
 .brain-notes { position: absolute; inset: 0; will-change: transform; }
 .note {
   position: absolute; left: var(--x); top: var(--y);
@@ -290,7 +293,7 @@
   grid-auto-columns: clamp(250px, 26vw, 360px);
   gap: 16px;
   overflow-x: auto;
-  padding: 4px var(--gutter) 20px;
+  padding: 8px var(--gutter) 20px;
   scroll-snap-type: x mandatory;
   scroll-padding-inline: var(--gutter);
   scrollbar-width: thin;
@@ -305,9 +308,20 @@
   background: var(--plate);
   border: 1px solid var(--line);
   overflow: hidden;
-  transition: border-color 0.25s var(--ease), transform 0.35s var(--ease);
+  position: relative;
+  transition: border-color var(--dur-2) var(--ease-out), transform 0.7s var(--ease-ui), box-shadow 0.45s var(--ease-out);
 }
-.ex-card:hover { border-color: var(--line-strong); transform: translateY(-3px); }
+.ex-card:hover { border-color: var(--line-strong); transform: translateY(-3px); box-shadow: 0 28px 60px -34px rgba(255, 63, 210, 0.55); }
+.ex-card.tilting { transition: border-color var(--dur-2) var(--ease-out), transform 0.16s var(--ease-out), box-shadow 0.45s var(--ease-out); }
+/* light that follows the pointer across the card glass */
+.ex-card::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  background: radial-gradient(380px circle at var(--gx, 50%) var(--gy, 0%), rgba(139, 234, 247, 0.11), transparent 50%);
+  opacity: 0; transition: opacity var(--dur-3) var(--ease-out);
+}
+.ex-card:hover::after { opacity: 1; }
+.mo .ex-card canvas { opacity: 0; transition: opacity 0.8s var(--ease-out); }
+.mo .ex-card canvas.drawn { opacity: 1; }
 .ex-card canvas { width: 100%; aspect-ratio: var(--ar, 4 / 3); }
 .ex-card:nth-child(3n+2) canvas { --ar: 1 / 1; }
 .ex-card:nth-child(3n) canvas { --ar: 5 / 4; }
@@ -316,6 +330,11 @@
 .ex-meta { margin-top: auto; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; }
 .ex-meta b { color: var(--text-2); font-weight: 500; }
 .ex-try { color: var(--green); }
+.strip-noscript { margin: 0; padding: 0 0 8px; color: var(--text-2); display: flex; flex-direction: column; gap: 8px; }
+.strip-noscript a { color: var(--cyan); text-underline-offset: 3px; }
+.strip-error { max-width: 1320px; margin: -20px auto 16px; padding: 0 var(--gutter); color: var(--amber); }
+html:not(.js) #status-pill { display: none; }
+.hint.hint-error { color: var(--amber); }
 
 /* ---------- science ---------- */
 .science { padding: clamp(60px, 10vw, 140px) var(--gutter); max-width: 1320px; margin: 0 auto; }
@@ -353,9 +372,69 @@
 .footer-links a { color: var(--text-2); text-decoration: none; font-size: 0.9rem; }
 .footer-links a:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
 
-/* ---------- reveal ---------- */
-.js .reveal { opacity: 0; transform: translateY(18px); transition: opacity 0.9s var(--ease), transform 0.9s var(--ease); }
-.js .reveal.in { opacity: 1; transform: none; }
+/* ---------- reveal (one-shot, IntersectionObserver) ----------
+   Hidden state is opacity only; the rise lives in the animation, so no transition on the
+   element (e.g. a button's own transitions) is ever hijacked. --rd staggers a batch. */
+.mo.reveal-armed .reveal:not(.in) { opacity: 0; }
+.mo.reveal-armed .reveal.in { animation: revealUp var(--dur-4) var(--ease-out) var(--rd, 0ms) backwards; }
+.mo.reveal-armed .statement-text.reveal.in { animation-duration: var(--dur-5); }
+.mo.reveal-armed .reveal.in.instant { animation: none; }
+@keyframes revealUp { from { opacity: 0; transform: translate3d(0, 18px, 0); } }
+/* the live raster unrolls with the hero intro, or when it first comes into view */
+.mo.reveal-armed .ribbon:not(.in) canvas { clip-path: inset(0 100% 0 0); }
+.mo.reveal-armed .ribbon.in canvas { animation: unroll 0.9s var(--ease-out) var(--rd, 0ms) backwards; }
+
+/* ---------- hero intro (html.intro is only set when motion is allowed) ----------
+   0 ms      far plate resolves from blur + scale; mid and near layers follow from nearer depths
+   ~100 ms   network ignites (canvas, JS): a wavefront of first spikes from the brain side
+   150 ms    nav settles
+   300 ms+   headline lines rise out of their masks, 90 ms apart
+   560-820   lede, composer, stats (+ count-up), raster strip unrolls, hint
+   all done < 1.6 s; text is readable from ~0.6 s and every control is live throughout */
+.intro .layer-far picture { animation: resolveFar 1.5s var(--ease-out) backwards; }
+@keyframes resolveFar { from { opacity: 0; transform: scale(1.14); filter: blur(16px) brightness(1.5); } }
+.intro .layer-mid img { animation: resolveMid 1.35s var(--ease-out) 0.12s backwards; }
+@keyframes resolveMid { from { opacity: 0; transform: scale(1.45) translate3d(0, 6%, 0); filter: blur(18px); } }
+.intro .layer-near img { animation: resolveNear 1.3s var(--ease-out) 0.2s backwards; }
+@keyframes resolveNear { from { opacity: 0; transform: scale(1.75) translate3d(6%, 8%, 0); } }
+.intro .nav { animation: navIn 0.9s var(--ease-out) 0.15s backwards; }
+@keyframes navIn { from { opacity: 0; transform: translate3d(0, -12px, 0); } }
+.intro .hero-eyebrow { animation: rise 0.9s var(--ease-out) 0.22s backwards; }
+.intro .hero-title .li { animation: lineUp 0.95s var(--ease-out) backwards; animation-delay: calc(0.3s + min(var(--ln, 0), 3) * 0.09s); }
+@keyframes lineUp { from { transform: translate3d(0, 112%, 0); } }
+.intro .lede { animation: rise 0.85s var(--ease-out) 0.56s backwards; }
+.intro .teaser { animation: rise 0.85s var(--ease-out) 0.66s backwards; }
+.intro .hint { animation: fade 0.6s var(--ease-out) 0.82s backwards; }
+.intro .meta-line { animation: rise 0.8s var(--ease-out) 0.7s backwards; }
+.intro .ribbon figcaption { animation: fade 0.6s var(--ease-out) 0.9s backwards; }
+@keyframes rise { from { opacity: 0; transform: translate3d(0, 16px, 0); } }
+@keyframes fade { from { opacity: 0; } }
+@keyframes unroll { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+@media (max-width: 768px) {
+  /* lighter on phones: no animated blur radius */
+  .intro .layer-far picture { animation-name: resolveFarLite; }
+  .intro .layer-mid img { animation-name: resolveNear; }
+}
+@keyframes resolveFarLite { from { opacity: 0; transform: scale(1.1); } }
+
+/* ---------- connectome: slow scale-in, then the region labels draw themselves ---------- */
+.mo .brain-img picture { transition: opacity 1.2s var(--ease-out), transform 1.6s var(--ease-out); }
+.mo.reveal-armed .brain:not(.in) .brain-img picture { opacity: 0; transform: scale(1.16); }
+.mo .note i { transition: scale 0.52s var(--ease-ui); transition-delay: calc(0.5s + var(--i, 0) * 0.17s); }
+.mo .note i::after { transform-origin: left center; transition: transform 0.64s var(--ease-out); transition-delay: calc(0.72s + var(--i, 0) * 0.17s); }
+.mo .note b { transition: opacity 0.6s var(--ease-out), translate 0.75s var(--ease-out); transition-delay: calc(0.92s + var(--i, 0) * 0.17s); }
+.mo.reveal-armed .brain:not(.in) .note i { scale: 0; }
+.mo.reveal-armed .brain:not(.in) .note i::after { transform: scaleX(0); }
+.mo.reveal-armed .brain:not(.in) .note b { opacity: 0; translate: -10px 0; }
+.sez-glow {
+  position: absolute; left: 50%; top: 83%; width: 24%; aspect-ratio: 1;
+  translate: -50% -50%; pointer-events: none; opacity: 0;
+  background: radial-gradient(closest-side, rgba(255, 63, 210, 0.55), rgba(255, 63, 210, 0.18) 55%, rgba(255, 63, 210, 0));
+  mix-blend-mode: screen;
+}
+/* after the SEZ label has drawn (0.92 s + 3 x 0.17 s + 0.6 s): one 900 ms glow, opacity only */
+.mo .brain.in .sez-glow { animation: sezPulse 900ms var(--ease-inout) 2.05s both; }
+@keyframes sezPulse { 0% { opacity: 0; } 35% { opacity: 1; } 100% { opacity: 0; } }
 
 /* ---------- responsive ---------- */
 @media (max-width: 1080px) {
@@ -373,9 +452,9 @@
     background:
       linear-gradient(180deg, rgba(5,6,7,0.55) 0%, rgba(5,6,7,0.72) 45%, rgba(5,6,7,0.9) 80%, var(--ink) 100%);
   }
-  .layer-far img { object-position: 85% 50%; }
+  .layer.layer-far img { object-position: 85% 50%; }
   .layer-mid { right: 4%; top: 12%; width: 120px; }
-  .hero-copy { padding-top: 104px; }
+  .hero-copy { padding-top: 92px; }
   .note-mb, .note-cx { display: none; }
   .note { font-size: 0.58rem; }
 }
@@ -390,13 +469,23 @@
   .note-ol { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .js .reveal { opacity: 1; transform: none; }
   .tick-underline::after { animation: none; }
+  .strip { translate: none !important; }
 }
 @media (max-width: 760px) { .note-long { display: none; } }
 @media (max-width: 520px) { .artifact { padding: 14px; } .artifact pre { font-size: 0.6rem; } }
 /* image plates have pure-black grounds; screen-blend them so they never print a darker rectangle on the page ink */
 .how-texture img, .cta-bg img, .brain-img img { mix-blend-mode: screen; }
+.brain-img img { filter: grayscale(1) contrast(1.2) brightness(0.9); }
+/* the ramp lives inside the <picture>, so it fades and scales with the plate it tints */
+.brain-img picture { position: relative; }
+.brain-img picture::after {
+  content: ""; position: absolute; inset: 0; z-index: 1; pointer-events: none;
+  background: linear-gradient(115deg, var(--magenta) 8%, var(--cyan) 52%, var(--green) 92%);
+  mix-blend-mode: color;
+  opacity: 0.9;
+}
+.brain-notes { z-index: 2; }
 /* Small phones: the SEZ label anchored at the brain's midline would run past the right edge
    (clipped at 360 px, since body hides horizontal overflow). Flip it to extend leftwards from
    its dot so the whole label stays on screen. */
@@ -404,4 +493,19 @@
   .note-sez { flex-direction: row-reverse; transform: translate(calc(-100% + 5px), -50%); }
   .note-sez i { margin-right: 0; margin-left: 20px; }
   .note-sez i::after { left: -21px; width: 14px; }
+  .mo .note-sez i::after { transform-origin: right center; }
+  .mo.reveal-armed .brain:not(.in) .note-sez b { translate: 10px 0; }
+}
+
+/* Print / full-page capture: nothing may stay in its pre-reveal state. */
+@media print {
+  .reveal, .brain-img picture, .note b, .note i { opacity: 1 !important; transform: none !important; translate: none !important; scale: none !important; animation: none !important; }
+  .note i::after { transform: none !important; }
+  .split-reveal .li { transform: none !important; }
+  .ribbon canvas { clip-path: none !important; animation: none !important; }
+  .nav { position: absolute; }
+}
+/* Phones: comfortable tap targets for small text links. */
+@media (pointer: coarse) {
+  .footer-links a, .ref-src a { display: inline-flex; align-items: center; min-height: 44px; }
 }
