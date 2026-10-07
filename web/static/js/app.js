@@ -1,8 +1,8 @@
 // FlyLab application: auth gate, composer, plan review, live runs, library, account.
 // Vanilla ES module. Every failure is shown on screen; nothing is only logged.
 
-import { SpikingNet, SpikeTrace, drawRasterThumb, drawResultRaster, hashString, COLORS } from "/static/js/neural.js?v=v3en";
-import { isReduced, onReducedChange, finePointer, EASE, DUR, STAGGER, enter, stagger, countUp, splitLines, segIndicator, toast, onceVisible } from "/static/js/motion.js?v=v3en";
+import { SpikingNet, SpikeTrace, drawRasterThumb, drawResultRaster, hashString, COLORS } from "/static/js/neural.js?v=v4g";
+import { isReduced, onReducedChange, finePointer, EASE, DUR, STAGGER, enter, stagger, countUp, splitLines, segIndicator, toast, onceVisible } from "/static/js/motion.js?v=v4g";
 
 /* ================================================================== */
 /* helpers                                                             */
@@ -98,6 +98,90 @@ function errorBanner(title, err, actions = []) {
     msg = (err && err.message) || String(err);
   }
   return banner("error", title, msg, { meta, actions });
+}
+
+/* ---------- AI budget (429 AI_BUDGET_EXHAUSTED; account usage) ---------- */
+// English everywhere; Russian only inside an AI panel whose language was set to Russian.
+const BUDGET_T = {
+  en: {
+    title: "The AI budget is used up",
+    user: "Your daily AI budget is used up",
+    global: "The lab’s daily AI budget is used up",
+    usedUser: (s, b) => `Your account has used ${s} of its ${b} Claude budget in the last 24 hours.`,
+    usedGlobal: (s, b) => `All accounts together have used ${s} of the lab’s ${b} Claude budget in the last 24 hours.`,
+    pausedUser: (w) => `Claude is paused for your account until ${w}.`,
+    pausedGlobal: (w) => `Claude is paused for everyone until ${w}.`,
+    noReset: "The server did not say when the budget frees up.",
+    badTime: (v) => `“${v}” (a time the page could not read)`,
+    today: "today",
+    tomorrow: "tomorrow",
+    at: (day, time, rel) => `${day} at ${time}${rel ? ` (${rel})` : ""}`,
+    passed: "should be over now — try again",
+    usage: "See your usage",
+  },
+  ru: {
+    title: "Бюджет ИИ исчерпан",
+    user: "Ваш дневной бюджет ИИ исчерпан",
+    global: "Дневной бюджет ИИ лаборатории исчерпан",
+    usedUser: (s, b) => `Ваш аккаунт потратил ${s} из своих ${b} на Claude за последние 24 часа.`,
+    usedGlobal: (s, b) => `Все аккаунты вместе потратили ${s} из ${b} бюджета лаборатории на Claude за последние 24 часа.`,
+    pausedUser: (w) => `Claude приостановлен для вашего аккаунта до ${w}.`,
+    pausedGlobal: (w) => `Claude приостановлен для всех до ${w}.`,
+    noReset: "Сервер не сообщил, когда бюджет освободится.",
+    badTime: (v) => `«${v}» (время, которое страница не смогла прочитать)`,
+    today: "сегодня",
+    tomorrow: "завтра",
+    at: (day, time, rel) => `${time} (${day}${rel ? `, ${rel}` : ""})`,
+    passed: "уже должно было наступить — попробуйте снова",
+    usage: "Посмотреть расход",
+  },
+};
+const fmtUsd = (n) => {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return null;
+  return v > 0 && v < 0.01 ? "<$0.01" : `$${v.toFixed(2)}`;
+};
+// A reset time in the viewer's own clock: "today at 14:32 GMT+3 (in 3 hours)".
+function fmtResetAt(iso, lang = "en") {
+  const T = BUDGET_T[lang] || BUDGET_T.en;
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return T.badTime(String(iso));
+  const loc = lang === "ru" ? "ru-RU" : "en-GB";
+  const time = d.toLocaleTimeString(loc, { hour: "2-digit", minute: "2-digit", timeZoneName: "short" });
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  const dayN = Math.floor((d.getTime() - midnight.getTime()) / 86400000);
+  const day = dayN === 0 ? T.today : dayN === 1 ? T.tomorrow : d.toLocaleDateString(loc, { day: "numeric", month: "short" });
+  const s = (d.getTime() - Date.now()) / 1000;
+  const f = new Intl.RelativeTimeFormat(lang === "ru" ? "ru" : "en", { numeric: "auto" });
+  const rel = s <= 0 ? T.passed : s < 3600 ? f.format(Math.max(1, Math.ceil(s / 60)), "minute") : f.format(Math.round(s / 3600), "hour");
+  return T.at(day, time, rel);
+}
+// Amber, never red: nothing is broken, the money for today is spent. Built from details when the
+// server sent them (scope, spent, budget, reset time), else from its message.
+function budgetBanner(err, lang = "en", { extra = null, actions = [] } = {}) {
+  const T = BUDGET_T[lang] || BUDGET_T.en;
+  const d = err && err.details && typeof err.details === "object" ? err.details : null;
+  const scope = d && (d.scope === "user" || d.scope === "global") ? d.scope : null;
+  const spent = d ? fmtUsd(d.spent_usd) : null;
+  const budget = d ? fmtUsd(d.budget_usd) : null;
+  const parts = [];
+  if (scope && spent && budget) parts.push(scope === "user" ? T.usedUser(spent, budget) : T.usedGlobal(spent, budget));
+  else if (err && err.message) parts.push(err.message);
+  if (d) {
+    const when = fmtResetAt(d.resets_at, lang);
+    parts.push(when ? (scope === "global" ? T.pausedGlobal(when) : T.pausedUser(when)) : T.noReset);
+  }
+  if (extra) parts.push(extra);
+  const title = scope === "user" ? T.user : scope === "global" ? T.global : T.title;
+  return banner("warn", title, parts.join(" "), { meta: errorMeta(err), actions: actions.filter(Boolean) });
+}
+// The account page shows the user's own usage; for the lab-wide budget there is nothing to see.
+function budgetUsageLink(err, lang = "en") {
+  const d = err && err.details;
+  if (d && d.scope === "global") return null;
+  return h("a", { class: "btn btn-sm btn-ghost", href: "#/account", text: (BUDGET_T[lang] || BUDGET_T.en).usage });
 }
 
 /* ---------- motion: skeletons, plan assembly, shared-element flight ---------- */
@@ -343,6 +427,7 @@ function leaveRoute() {
   liveTraces.clear();
   for (const fn of routeCleanups) fn();
   routeCleanups.clear();
+  aiLeave(); // interpretation polling and its views belong to the route too
 }
 function trace(canvas, opts) {
   const t = new SpikeTrace(canvas, { ...opts, reduced: Boolean(opts.reduced) || isReduced() });
@@ -459,7 +544,38 @@ onReducedChange((on) => {
   }
 });
 
-// Hide "Create account" when the server says registration is closed (capabilities).
+// Registration policy from /capabilities: "open", "invite" (sign-up needs the invite code) or
+// "closed" (sign-up hidden). null until the server answered.
+let regMode = null;
+function setRegMode(mode) {
+  regMode = mode;
+  $("#tab-register").hidden = mode === "closed";
+  if (mode === "closed" && authMode === "register") setAuthMode("login");
+  syncInviteField();
+}
+function syncInviteField() {
+  const show = authMode === "register" && regMode === "invite";
+  const field = $("#field-invite");
+  const wasHidden = field.hidden;
+  field.hidden = !show;
+  if (!show) inviteError(null);
+  if (show && wasHidden) enter(field, { y: -6, duration: DUR.view, delay: 80 });
+}
+// The invite code's own problems (missing, not valid) are shown on the field, not in a banner.
+function inviteError(text, meta = null) {
+  const el = $("#err-invite");
+  const input = $("#auth-invite");
+  if (!text) {
+    el.hidden = true;
+    el.replaceChildren();
+    input.removeAttribute("aria-invalid");
+    return;
+  }
+  el.replaceChildren(h("span", { text }), meta ? h("span", { class: "mono field-error-meta", text: meta }) : null);
+  el.hidden = false;
+  input.setAttribute("aria-invalid", "true");
+}
+
 async function applyRegistrationPolicy() {
   let note = $("#auth-reg-note");
   if (!note) {
@@ -469,16 +585,19 @@ async function applyRegistrationPolicy() {
   note.replaceChildren();
   try {
     const { data } = await api("/capabilities", { gate: false });
-    if (!data || typeof data.registration_open !== "boolean") {
-      throw new ApiError(200, "BAD_SHAPE", "GET /capabilities did not report registration_open");
+    let mode = data ? data.registration_mode : undefined;
+    // A server from before registration_mode reports only the open/closed flag.
+    if (mode === undefined && data && typeof data.registration_open === "boolean") mode = data.registration_open ? "open" : "closed";
+    if (mode !== "open" && mode !== "invite" && mode !== "closed") {
+      throw new ApiError(200, "BAD_SHAPE", `GET /capabilities reported registration_mode “${mode}” (expected open, invite or closed)`);
     }
-    $("#tab-register").hidden = !data.registration_open;
-    if (!data.registration_open) {
-      if (authMode === "register") setAuthMode("login");
+    setRegMode(mode);
+    if (mode === "closed") {
       note.replaceChildren(banner("info", "Accounts are created by the administrator",
         "Registration is closed on this server. Ask the lab administrator for an account, then sign in here."));
     }
   } catch (err) {
+    setRegMode(null);
     $("#tab-register").hidden = false;
     note.replaceChildren(errorBanner("Could not check whether registration is open", err, [
       h("button", { class: "btn btn-sm", type: "button", text: "Check again", onclick: applyRegistrationPolicy }),
@@ -493,6 +612,7 @@ function setAuthMode(mode) {
   $("#tab-login").setAttribute("aria-selected", String(!reg));
   $("#tab-register").setAttribute("aria-selected", String(reg));
   $("#field-display").hidden = !reg;
+  syncInviteField();
   $("#auth-title").textContent = reg ? "Create your lab account" : "Sign in to the lab";
   $("#auth-sub").textContent = reg
     ? "Pick a username. Your runs and exports stay private to it."
@@ -516,6 +636,7 @@ $(".auth-tabs").addEventListener("keydown", (e) => {
   }
 });
 
+$("#auth-invite").addEventListener("input", () => inviteError(null));
 $("#auth-username").addEventListener("input", (e) => {
   const v = e.target.value;
   if (v !== v.toLowerCase()) e.target.value = v.toLowerCase();
@@ -528,26 +649,45 @@ $("#auth-form").addEventListener("submit", async (e) => {
   const username = $("#auth-username").value.trim().toLowerCase();
   const password = $("#auth-password").value;
   const display = $("#auth-display").value.trim();
+  const register = authMode === "register";
+  const needInvite = register && !$("#field-invite").hidden;
+  const invite = needInvite ? $("#auth-invite").value.trim() : "";
+  inviteError(null);
   const problems = [];
   if (!/^[a-z0-9_.-]{3,32}$/.test(username)) problems.push("Username must be 3–32 characters of a–z, 0–9, dot, dash or underscore.");
   if (password.length < 8 || password.length > 128) problems.push("Password must be 8–128 characters.");
-  if (problems.length) {
-    errBox.replaceChildren(banner("error", "Check the form", problems.join(" ")));
+  if (problems.length) errBox.replaceChildren(banner("error", "Check the form", problems.join(" ")));
+  if (needInvite && !invite) inviteError("Enter the invite code you were given.");
+  if (problems.length || (needInvite && !invite)) {
+    if (!problems.length) $("#auth-invite").focus();
     return;
   }
   const btn = $("#auth-submit");
   btn.disabled = true;
   const label = btn.textContent;
-  btn.textContent = authMode === "register" ? "Creating account…" : "Signing in…";
+  btn.textContent = register ? "Creating account…" : "Signing in…";
   try {
-    const body = authMode === "register" ? { username, password, ...(display ? { display_name: display } : {}) } : { username, password };
-    await api(authMode === "register" ? "/api/v1/auth/register" : "/api/v1/auth/login", { method: "POST", body, gate: false });
+    const body = register
+      ? { username, password, ...(display ? { display_name: display } : {}), ...(invite ? { invite_code: invite } : {}) }
+      : { username, password };
+    await api(register ? "/api/v1/auth/register" : "/api/v1/auth/login", { method: "POST", body, gate: false });
     const { data } = await api("/api/v1/me", { gate: false });
     state.me = data;
     $("#auth-password").value = "";
+    $("#auth-invite").value = "";
     showShell();
   } catch (err) {
-    errBox.replaceChildren(errorBanner(authMode === "register" ? "Could not create the account" : "Could not sign in", err));
+    if (register && err instanceof ApiError && (err.code === "INVITE_REQUIRED" || err.code === "INVALID_INVITE")) {
+      // The server wants an invite code (perhaps enabled after this page loaded): show the
+      // field and say what is wrong right on it.
+      if (regMode !== "invite") setRegMode("invite");
+      inviteError(err.code === "INVITE_REQUIRED"
+        ? "This server needs an invite code to create an account. Ask the lab administrator for one."
+        : "This invite code is not valid. Check it with the lab administrator and try again.", errorMeta(err));
+      $("#auth-invite").focus();
+    } else {
+      errBox.replaceChildren(errorBanner(register ? "Could not create the account" : "Could not sign in", err));
+    }
   } finally {
     btn.disabled = false;
     btn.textContent = label;
@@ -619,6 +759,8 @@ async function loadCaps() {
     if (data.worker_error) set("bad", "Worker degraded", data.worker_error);
     else if (!engine) set("bad", data.datasets_ready !== true ? "Engine offline · data missing" : "Engine offline · simulator missing");
     else if (data.llm_ready !== true) set("warn", "Planner offline", "The simulator works. Plans come from the heuristic parser or the Advanced form.");
+    else if (data.ai_budget_error) set("warn", "AI budget unknown", data.ai_budget_error);
+    else if (data.ai_budget_available === false) set("warn", "AI budget used up", "The lab’s daily Claude budget is used up. The simulator and the Advanced form still work.");
     else set("ok", `Ready · ${data.llm_model || "planner"}`, `Simulator ready. Planner: ${data.llm_provider || "claude-cli"} / ${data.llm_model || ""}`);
   } catch (err) {
     state.capsError = err;
@@ -637,8 +779,13 @@ function paintWorkerBanner() {
     $("#global-banner").before(wb);
   }
   const werr = state.caps && state.caps.worker_error;
-  wb.replaceChildren(werr ? banner("error", "The simulation worker is in trouble", werr,
-    { meta: "Runs may show a stale status until the server is restarted" }) : "");
+  const ierr = state.caps && state.caps.interpret_worker_error;
+  wb.replaceChildren(...[
+    werr ? banner("error", "The simulation worker is in trouble", werr,
+      { meta: "Runs may show a stale status until the server is restarted" }) : null,
+    ierr ? banner("error", "The interpretation worker is in trouble", ierr,
+      { meta: "Queued AI hypotheses may not start until the server is fixed" }) : null,
+  ].filter(Boolean));
 }
 function paintCapsNotice(slot) {
   const c = state.caps;
@@ -650,6 +797,12 @@ function paintCapsNotice(slot) {
       : "The simulator binary is missing on the server. Plans can be drafted, but runs will fail until it is installed."));
   } else if (c && c.llm_ready !== true) {
     slot.replaceChildren(banner("warn", "The language planner is offline", "Generate plan will fall back to a simple keyword parser — review its plan carefully, or use Advanced to set every parameter yourself."));
+  } else if (c && c.ai_budget_error) {
+    slot.replaceChildren(banner("error", "The AI budget could not be checked", String(c.ai_budget_error),
+      { meta: "ai_budget_error · Generate plan and AI hypotheses may be refused until this is fixed" }));
+  } else if (c && c.ai_budget_available === false) {
+    slot.replaceChildren(banner("warn", "The lab’s daily AI budget is used up",
+      "Generate plan and AI hypotheses pause until spending from the last 24 hours ages out. Advanced still builds plans without Claude, and runs work as usual."));
   } else {
     slot.replaceChildren();
   }
@@ -981,10 +1134,19 @@ function renderNew(params) {
       clearInterval(tick);
       if (gen !== routeGen) return;
       planSlot.replaceChildren();
+      const useAdvanced = h("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Use Advanced", onclick: () => { if (advanced.hidden) advToggle.click(); advanced.scrollIntoView({ behavior: isReduced() ? "auto" : "smooth", block: "start" }); } });
+      if (err instanceof ApiError && err.code === "AI_BUDGET_EXHAUSTED") {
+        // Retrying cannot help before the reset; Advanced builds plans without Claude.
+        parseSlot.replaceChildren(budgetBanner(err, "en", {
+          extra: "Advanced still works: it builds a plan without Claude.",
+          actions: [useAdvanced, budgetUsageLink(err, "en")],
+        }));
+        return;
+      }
       const titles = { 502: "The planner failed on this request", 503: "The planner is busy", 429: "Planner limit reached", 401: "You are signed out" };
       parseSlot.replaceChildren(errorBanner(titles[err.status] || "Could not generate a plan", err, [
         h("button", { class: "btn btn-sm", type: "button", text: "Try again", onclick: () => composer.requestSubmit() }),
-        h("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Use Advanced", onclick: () => { if (advanced.hidden) advToggle.click(); advanced.scrollIntoView({ behavior: isReduced() ? "auto" : "smooth", block: "start" }); } }),
+        useAdvanced,
       ]));
       return;
     } finally {
@@ -1920,21 +2082,29 @@ async function renderJobPage(jobId, params = new URLSearchParams()) {
   const aiBtn = h("button", { class: "btn ai-hero-btn", type: "button", hidden: true });
   let aiPanel = null;
   // Labelled in the language of the stored hypotheses once there are some (the panel switches
-  // to it too), else in the default language.
-  const paintAiBtn = (has, lang) => {
+  // to it too), else in the default language. While a request is queued or running it says so
+  // and only leads to the panel.
+  const paintAiBtn = (kind, has, lang) => {
     const L = aiT(lang || (has && job.interpretation_language) || aiDefaultLang(job));
     aiBtn.dataset.has = String(has);
-    aiBtn.replaceChildren(h("span", { class: "ai-glyph", "aria-hidden": "true" }), h("span", { lang: L.code, text: has ? L.viewHyp : L.interpret }));
+    aiBtn.dataset.state = kind || "none";
+    aiBtn.replaceChildren(h("span", { class: "ai-glyph", "aria-hidden": "true" }),
+      h("span", { lang: L.code, text: has ? L.viewHyp : AI_ACTIVE.has(kind) ? L.inProgress : L.interpret }));
   };
-  paintAiBtn(job.has_interpretation === true);
+  const histAi = aiHistState(job);
+  paintAiBtn(histAi, job.has_interpretation === true || histAi === "ready");
+  const onAiState = (x) => {
+    const ml = x.result && x.result.meta && x.result.meta.language;
+    paintAiBtn(x.state, Boolean(x.result), ml === "ru" || ml === "en" ? ml : null);
+  };
   const ensureAi = (opts = {}) => {
     aiBtn.hidden = false;
-    if (!aiPanel) aiPanel = mountAiPanel(aiSlot, job, { ...opts, onHas: paintAiBtn });
+    if (!aiPanel) aiPanel = mountAiPanel(aiSlot, job, { ...opts, onState: onAiState });
     return aiPanel;
   };
   aiBtn.addEventListener("click", () => {
     const p = ensureAi();
-    if (aiBtn.dataset.has !== "true") p.start();
+    if (aiBtn.dataset.has !== "true" && !AI_ACTIVE.has(aiBtn.dataset.state)) p.start();
     p.reveal();
   });
   const onSucceeded = () => ensureAi({ scroll: params.get("ai") === "1" });
@@ -2086,14 +2256,20 @@ const AI_T = {
       429: "Interpretation limit reached",
       502: "Claude could not produce hypotheses",
       503: "Claude is busy right now",
+      AI_BUDGET_EXHAUSTED: "The AI budget is used up",
+      INTERPRETATION_IN_PROGRESS: "Another interpretation is in progress",
+      QUEUE_FULL: "The interpretation queue is full",
+      WORKER_INTERRUPTED: "The interpreter restarted while this was running",
+      LLM_ERROR: "Claude could not produce hypotheses",
+      INTERPRETATION_NOT_FOUND: "The interpretation request is gone",
+      AI_BUDGET_CHECK_FAILED: "The AI budget could not be checked",
+      AI_USAGE_RECORD_FAILED: "The cost of this call could not be recorded",
+      STORE_ERROR: "The server could not read or save its data",
+      JOB_NOT_COMPLETED: "This run has not finished yet",
     },
     lastFailed: "The last attempt failed",
     toastReady: (t) => `Hypotheses ready · ${t}`,
-    failedTitle: (t) => `Interpretation failed · ${t}`,
-    openRun: "Open the run",
-    dismiss: "Dismiss",
-    waiting: "Waiting",
-    waitingFor: (t) => `One interpretation runs at a time: this one can start when “${t}” is done.`,
+    waitingFor: (t) => `One interpretation per account at a time: this one can be requested when “${t}” is done.`,
     testWarnTitle: "This test may not discriminate as written",
     calibTitle: "Confidence check",
     interpreting: "Interpreting",
@@ -2101,6 +2277,33 @@ const AI_T = {
     cta: "Ask AI what this might mean",
     ctaSub: "Claude proposes hypotheses from this run’s numbers, each with a test you can run. Hypotheses, not findings.",
     untitled: "Untitled hypothesis",
+    // v4: the interpretation queue
+    queuedPos: (n) => (n > 0 ? `Queued — position ${n}` : "Queued"),
+    running: "Running",
+    failed: "Failed",
+    inProgress: "Hypotheses in progress",
+    queueTitle: "Waiting for the interpreter",
+    queueSub: "One interpretation at a time, oldest request first",
+    queueNote: "You can leave this page: the request keeps its place in the queue, and the result is saved with this run and shows up here and in the Library.",
+    queueSr: (n) => `Interpretation queued${n > 0 ? `, position ${n}` : ""}.`,
+    regenQueued: (n) => (n > 0 ? `New hypotheses queued — position ${n}` : "New hypotheses queued"),
+    failedHead: "Interpretation failed",
+    failedPrev: "The hypotheses below are the previous result.",
+    noFailMsg: "The server gave no reason.",
+    loadingReason: "loading the reason…",
+    sending: "Sending…",
+    labQueue: (q, r) => `Lab queue right now: ${q} waiting, ${r} running.`,
+    inProgressBody: "Your account runs one interpretation at a time; ask for this one when that one is done.",
+    openThatRun: "Open that run",
+    openRunNamed: (t) => `Open “${t}”`,
+    queueFullBody: "Try again in a few minutes.",
+    pollRetryTitle: "Status updates paused",
+    pollRetry: (n) => `Lost connection to the server — retrying (attempt ${n} of 8). The interpretation keeps going on the server either way.`,
+    reconnecting: "Reconnecting…",
+    pollStopped: "Status updates stopped",
+    resume: "Resume",
+    badState: (v) => `Unknown interpretation state “${v}”`,
+    queueUnknown: "The lab queue could not be read",
   },
   ru: {
     code: "ru",
@@ -2189,14 +2392,20 @@ const AI_T = {
       429: "Лимит интерпретаций исчерпан",
       502: "Claude не смог сформулировать гипотезы",
       503: "Claude сейчас занят",
+      AI_BUDGET_EXHAUSTED: "Бюджет ИИ исчерпан",
+      INTERPRETATION_IN_PROGRESS: "Уже идёт другая интерпретация",
+      QUEUE_FULL: "Очередь интерпретаций заполнена",
+      WORKER_INTERRUPTED: "Интерпретатор перезапустился во время работы",
+      LLM_ERROR: "Claude не смог сформулировать гипотезы",
+      INTERPRETATION_NOT_FOUND: "Запрос на интерпретацию пропал",
+      AI_BUDGET_CHECK_FAILED: "Не удалось проверить бюджет ИИ",
+      AI_USAGE_RECORD_FAILED: "Не удалось записать стоимость вызова",
+      STORE_ERROR: "Сервер не смог прочитать или сохранить данные",
+      JOB_NOT_COMPLETED: "Запуск ещё не завершён",
     },
     lastFailed: "Последняя попытка не удалась",
     toastReady: (t) => `Гипотезы готовы · ${t}`,
-    failedTitle: (t) => `Интерпретация не удалась · ${t}`,
-    openRun: "Открыть запуск",
-    dismiss: "Закрыть",
-    waiting: "Ожидание",
-    waitingFor: (t) => `Интерпретации идут по одной: эта начнётся, когда закончится «${t}».`,
+    waitingFor: (t) => `Одна интерпретация на аккаунт за раз: эту можно запросить, когда закончится «${t}».`,
     testWarnTitle: "В таком виде проверка может ничего не различить",
     calibTitle: "Проверка уверенности",
     interpreting: "Интерпретируем",
@@ -2204,6 +2413,32 @@ const AI_T = {
     cta: "Спросить ИИ, что это может значить",
     ctaSub: "Claude предложит гипотезы по числам этого запуска, к каждой — проверку, которую можно запустить. Гипотезы, а не выводы.",
     untitled: "Гипотеза без названия",
+    queuedPos: (n) => (n > 0 ? `В очереди — место ${n}` : "В очереди"),
+    running: "Выполняется",
+    failed: "Ошибка",
+    inProgress: "Гипотезы готовятся",
+    queueTitle: "Ждём интерпретатор",
+    queueSub: "Интерпретации идут по одной, в порядке очереди",
+    queueNote: "Страницу можно покинуть: запрос сохранит место в очереди, а результат сохранится в этом запуске и появится здесь и в библиотеке.",
+    queueSr: (n) => `Интерпретация в очереди${n > 0 ? `, место ${n}` : ""}.`,
+    regenQueued: (n) => (n > 0 ? `Новые гипотезы в очереди — место ${n}` : "Новые гипотезы в очереди"),
+    failedHead: "Интерпретация не удалась",
+    failedPrev: "Ниже — предыдущий результат.",
+    noFailMsg: "Сервер не указал причину.",
+    loadingReason: "загружаем причину…",
+    sending: "Отправляем…",
+    labQueue: (q, r) => `Очередь лаборатории сейчас: ждут ${q}, выполняется ${r}.`,
+    inProgressBody: "Аккаунт выполняет одну интерпретацию за раз; запросите эту, когда закончится та.",
+    openThatRun: "Открыть тот запуск",
+    openRunNamed: (t) => `Открыть «${t}»`,
+    queueFullBody: "Попробуйте через несколько минут.",
+    pollRetryTitle: "Обновления статуса приостановлены",
+    pollRetry: (n) => `Нет связи с сервером — повторяем (попытка ${n} из 8). Интерпретация на сервере продолжается в любом случае.`,
+    reconnecting: "Переподключаемся…",
+    pollStopped: "Обновления статуса остановлены",
+    resume: "Продолжить",
+    badState: (v) => `Неизвестное состояние интерпретации «${v}»`,
+    queueUnknown: "Не удалось прочитать очередь лаборатории",
   },
 };
 const aiT = (lang) => AI_T[lang] || AI_T.en;
@@ -2218,16 +2453,43 @@ function aiDefaultLang(job) {
 // The interpretation model, when the server reports it; otherwise the UI just says "Claude".
 const aiModelName = () => (state.caps && (state.caps.interpret_model || state.caps.llm_interpret_model)) || null;
 
-/* Requests outlive the view that started them: a Library card or a run page can be left while
-   Claude works. The in-flight record, the latest result and the latest failure are kept per job,
-   so whichever view of that job is on screen next shows the progress, the result or the error. */
-const aiStore = { epoch: 0, inflight: new Map(), cache: new Map(), errors: new Map(), digests: new Map() };
+/* Interpretations (v4) are queued and run on the server; nothing a page does cancels them.
+   Every view of a job (run-page panel, Library card) reads the job's state from
+   GET .../interpretation and, while the request is queued or running, reads it again every 3 s.
+   Polling belongs to the page: it stops on a terminal state, when no view of that job is on
+   screen any more, on route change and on sign-out (its timers are route timers). Coming back
+   to a run reads its state from GET again. */
+const AI_POLL_MS = 3000;
+const AI_ACTIVE = new Set(["queued", "running"]);
+const AI_STATES = new Set(["queued", "running", "failed", "ready"]);
+const aiStore = {
+  epoch: 0,
+  // jobId -> { state: none|queued|running|failed|ready, request, result, full }. `result` is the
+  // v3 response (interpretation, digest, meta, …); `full` = the answer said whether one exists.
+  status: new Map(),
+  errors: new Map(),     // jobId -> error of the last POST (budget, another in progress, queue full, …)
+  pollErrors: new Map(), // jobId -> { err, attempt } while retrying, { err, stopped: true } once given up
+  posting: new Map(),    // jobId -> POST in flight
+  watchers: new Map(),   // jobId -> its poll loop
+  subs: new Set(),       // views on screen: { el, jobId, fn }
+  labels: new Map(),     // jobId -> run title, so notes and links can name the run
+  digests: new Map(),    // jobId -> digest (deterministic; kept until sign-out)
+};
+// Sign-out: nothing of this account survives.
 function aiReset() {
   aiStore.epoch++;
-  aiStore.inflight.clear();
-  aiStore.cache.clear();
-  aiStore.errors.clear();
+  aiLeave();
+  aiStore.posting.clear();
+  aiStore.labels.clear();
   aiStore.digests.clear();
+}
+// Route change: the views go and their polling with them; the next page reads fresh state.
+function aiLeave() {
+  aiStore.watchers.clear();
+  aiStore.subs.clear();
+  aiStore.status.clear();
+  aiStore.errors.clear();
+  aiStore.pollErrors.clear();
 }
 
 function checkInterpretation(data, where) {
@@ -2237,40 +2499,146 @@ function checkInterpretation(data, where) {
   }
   return data;
 }
+// {state, request, ...result fields} -> { state, request, result }. Shapes outside the contract
+// are errors, not guesses.
+function aiAnswer(data, where) {
+  if (!data || typeof data !== "object") throw new ApiError(200, "BAD_SHAPE", `${where} did not return an object`);
+  const st = data.state;
+  if (!AI_STATES.has(st)) throw new ApiError(200, "BAD_SHAPE", `${where} answered with state “${st}” (expected queued, running, failed or ready)`);
+  const req = data.request && typeof data.request === "object" ? data.request : null;
+  if (st !== "ready" && !req) throw new ApiError(200, "BAD_SHAPE", `${where} answered state “${st}” without its request`);
+  const has = data.interpretation !== undefined && data.interpretation !== null;
+  if (st === "ready" && !has) throw new ApiError(200, "BAD_SHAPE", `${where} answered state “ready” without an interpretation`);
+  if (has) checkInterpretation(data, where);
+  const resultError = typeof data.result_error === "string" && data.result_error ? data.result_error : null;
+  return { state: st, request: req, result: has ? data : null, resultError, full: true };
+}
+// Library cards start from history's interpretation_state (a server from before the queue only
+// sends has_interpretation).
+function aiHistState(job) {
+  if (job.interpretation_state !== undefined) return job.interpretation_state;
+  return job.has_interpretation === true ? "ready" : null;
+}
 
-function aiRequest(jobId, lang, regenerate, label) {
-  const cur = aiStore.inflight.get(jobId);
+function aiSubscribe(el, jobId, fn) {
+  const sub = { el, jobId, fn, seen: false };
+  aiStore.subs.add(sub);
+  return sub;
+}
+function aiEmit(jobId, info = {}) {
+  for (const sub of [...aiStore.subs]) {
+    if (!sub.el.isConnected) {
+      if (sub.seen) aiStore.subs.delete(sub); // its card or panel was replaced
+      continue;
+    }
+    sub.seen = true;
+    sub.fn(jobId, info);
+  }
+}
+const aiWatched = (jobId) => [...aiStore.subs].some((x) => x.jobId === jobId && x.el.isConnected);
+const aiOtherActive = (jobId) => {
+  for (const [id, x] of aiStore.status) if (id !== jobId && AI_ACTIVE.has(x.state)) return id;
+  return null;
+};
+
+function aiNote(jobId, ans) {
+  const prev = aiStore.status.get(jobId);
+  // A 202 carries only the request: the stored result, if any, stays while a new one is made.
+  if (!ans.result && !ans.resultError && AI_ACTIVE.has(ans.state) && prev && (prev.result || prev.resultError)) ans = { ...ans, result: prev.result, resultError: prev.resultError };
+  aiStore.status.set(jobId, ans);
+  if (ans.state === "ready") aiStore.errors.delete(jobId);
+  const arrived = Boolean(prev && AI_ACTIVE.has(prev.state) && ans.state === "ready");
+  if (arrived) {
+    const meta = ans.result && ans.result.meta;
+    toast(aiT(meta && meta.language).toastReady(aiStore.labels.get(jobId) || jobId));
+  }
+  aiEmit(jobId, { arrived });
+}
+
+// One poll loop per job on this page, shared by all its views. The first read is deferred a tick
+// so a card built off-DOM is on screen by then.
+function aiWatch(jobId, delay = 0) {
+  if (aiStore.watchers.has(jobId)) return;
+  const w = { epoch: aiStore.epoch, gen: routeGen, failures: 0 };
+  aiStore.watchers.set(jobId, w);
+  later(() => aiPoll(jobId, w), delay);
+}
+function aiResume(jobId) {
+  aiStore.pollErrors.delete(jobId);
+  aiEmit(jobId);
+  aiWatch(jobId);
+}
+async function aiPoll(jobId, w) {
+  const live = () => aiStore.watchers.get(jobId) === w && w.epoch === aiStore.epoch && w.gen === routeGen;
+  if (!live()) return;
+  if (!aiWatched(jobId)) { aiStore.watchers.delete(jobId); return; } // nobody looks at this job any more
+  let ans;
+  try {
+    const { data } = await api(`/api/v1/jobs/${encodeURIComponent(jobId)}/interpretation`);
+    if (!live()) return;
+    ans = aiAnswer(data, "GET /interpretation");
+  } catch (err) {
+    if (!live()) return;
+    if (err instanceof ApiError && err.status === 404 && err.code === "INTERPRETATION_NOT_FOUND") {
+      const prev = aiStore.status.get(jobId);
+      aiStore.watchers.delete(jobId);
+      aiStore.pollErrors.delete(jobId);
+      // Nothing requested yet is the normal empty state; a request this page was following that
+      // vanished is said out loud.
+      if (prev && prev.state !== "none" && prev.state !== "ready") aiStore.errors.set(jobId, err);
+      aiNote(jobId, { state: "none", request: null, result: null, full: true });
+      return;
+    }
+    if (isNetworkError(err) && w.failures < 8) {
+      w.failures += 1;
+      aiStore.pollErrors.set(jobId, { err, attempt: w.failures });
+      aiEmit(jobId);
+      later(() => aiPoll(jobId, w), Math.min(8000, 1000 * 2 ** (w.failures - 1)));
+      return;
+    }
+    aiStore.watchers.delete(jobId);
+    aiStore.pollErrors.set(jobId, { err, stopped: true });
+    aiEmit(jobId);
+    return;
+  }
+  w.failures = 0;
+  aiStore.pollErrors.delete(jobId);
+  if (AI_ACTIVE.has(ans.state)) later(() => aiPoll(jobId, w), AI_POLL_MS);
+  else aiStore.watchers.delete(jobId);
+  aiNote(jobId, ans);
+}
+
+// POST: 200 {state:"ready", ...} (a stored result) or 202 {state:"queued"|"running", request}.
+// One POST per job at a time; its error stays with the job until the next attempt.
+function aiPost(jobId, lang, regenerate) {
+  const cur = aiStore.posting.get(jobId);
   if (cur) return cur;
   const epoch = aiStore.epoch;
-  const rec = { jobId, label: label || jobId, started: performance.now(), lang, regenerate: Boolean(regenerate), promise: null };
   aiStore.errors.delete(jobId);
-  rec.promise = api(`/api/v1/jobs/${encodeURIComponent(jobId)}/interpretation`, { method: "POST", body: { language: lang, regenerate: Boolean(regenerate) } })
-    .then(({ data }) => {
-      checkInterpretation(data, "POST /interpretation");
-      if (epoch === aiStore.epoch) {
-        aiStore.cache.set(jobId, data);
-        aiStore.errors.delete(jobId);
-        // a confirmation wherever the user is now; failures are shown inline by the job's views
-        toast(aiT(lang).toastReady(label || jobId));
-      }
-      return data;
-    }, (err) => {
-      if (epoch === aiStore.epoch) {
-        aiStore.errors.set(jobId, err);
-        // The request may have run for minutes while the user went elsewhere: a failure is
-        // announced wherever they are (like a success), unless this run's page is open, where
-        // the panel shows it inline. It stays until dismissed.
-        if (!location.hash.startsWith(`#/job/${encodeURIComponent(jobId)}`)) aiFailNotice(lang, label || jobId, jobId, err);
-      }
-      throw err;
-    })
-    .finally(() => { if (aiStore.inflight.get(jobId) === rec) aiStore.inflight.delete(jobId); });
-  // Every view of this job attaches its own handlers; this one only keeps a failure that happens
-  // while no view is attached from becoming an unhandled rejection. The failure itself is kept in
-  // aiStore.errors and shown by the next card or panel of this job.
-  rec.promise.catch(() => {});
-  aiStore.inflight.set(jobId, rec);
-  return rec;
+  const run = async () => {
+    let ans = null, error = null;
+    try {
+      const { data } = await api(`/api/v1/jobs/${encodeURIComponent(jobId)}/interpretation`, { method: "POST", body: { language: lang, regenerate: Boolean(regenerate) } });
+      ans = aiAnswer(data, "POST /interpretation");
+      ans.full = ans.state === "ready" || Boolean(ans.result);
+    } catch (err) {
+      error = err;
+    }
+    if (aiStore.posting.get(jobId) === p) aiStore.posting.delete(jobId);
+    if (epoch !== aiStore.epoch) return;
+    if (error) {
+      aiStore.errors.set(jobId, error);
+      aiEmit(jobId);
+      return;
+    }
+    aiStore.pollErrors.delete(jobId);
+    if (AI_ACTIVE.has(ans.state)) aiWatch(jobId, AI_POLL_MS);
+    aiNote(jobId, ans);
+  };
+  const p = run();
+  aiStore.posting.set(jobId, p);
+  aiEmit(jobId);
+  return p;
 }
 
 async function fetchDigest(jobId) {
@@ -2308,29 +2676,6 @@ function aiErrorBanner(L, err, actions = [], titleOverride = null) {
   if (note) b.querySelector(".b-body").append(" ", note);
   return b;
 }
-// A failure notice that stays on screen (bottom corner) until dismissed, with a link to the run.
-function aiFailNotice(lang, label, jobId, err) {
-  const L = aiT(lang);
-  let host = document.querySelector(".ai-notices");
-  if (!host) {
-    host = h("div", { class: "ai-notices" });
-    document.body.append(host);
-  }
-  const note = aiRetryNote(L, err);
-  const close = h("button", { class: "btn btn-ghost btn-sm", type: "button", text: L.dismiss });
-  const card = h("div", { class: "ai-notice", role: "alert", lang: L.code },
-    h("p", { class: "ai-notice-title", text: L.failedTitle(label) }),
-    h("p", { class: "ai-notice-body" }, h("b", { text: `${aiErrTitle(L, err)}: ` }), (err && err.message) || String(err), note ? ` ${note}` : ""),
-    errorMeta(err) ? h("p", { class: "ai-notice-meta mono", text: errorMeta(err) }) : null,
-    h("div", { class: "ai-notice-actions" },
-      h("a", { class: "btn btn-sm", href: `#/job/${encodeURIComponent(jobId)}?ai=1`, text: L.openRun, onclick: () => card.remove() }),
-      close));
-  close.addEventListener("click", () => card.remove());
-  host.append(card);
-  while (host.childElementCount > 3) host.firstElementChild.remove();
-  enter(card, { y: 10, duration: DUR.view });
-}
-
 /* ---------- the permanent label + disclaimer ---------- */
 function aiStamp(L, disclaimer) {
   const text = typeof disclaimer === "string" && disclaimer.trim() ? disclaimer : null;
@@ -2639,137 +2984,161 @@ function digestDetails(st, L, load, titleText) {
   };
 }
 
-/* ---------- loading plate (no interpretation yet) ---------- */
-function aiLoadingPlate(L, rec, uid) {
+/* ---------- queue state: plate (no result yet) and strip (a new result on its way) ---------- */
+const aiElapsed = (sec, code) => {
+  const u = code === "ru" ? ["с", "мин"] : ["s", "min"];
+  return sec < 60 ? `${Math.floor(sec)} ${u[0]}` : `${Math.floor(sec / 60)} ${u[1]} ${Math.floor(sec % 60)} ${u[0]}`;
+};
+// Seconds since the request was queued (queued) or started (running), from the server's clock.
+function aiReqSeconds(s) {
+  const r = (s && s.request) || {};
+  return secondsBetween(s && s.state === "running" ? r.started_at : r.queued_at);
+}
+const aiPos = (s) => Math.max(0, Number(s && s.request && s.request.position) || 0);
+
+// The plate is built once per request and updated in place on every poll, so the live trace
+// and the reader's place do not jump every 3 s.
+function aiQueuePlate(L, uid) {
+  const chip = h("span", { class: "status ai-q-chip" });
+  const title = h("p", { class: "drafting-title" });
+  const sub = h("span");
   const elapsed = h("span", { class: "mono", "aria-hidden": "true" });
-  const note = h("p", { class: "ai-load-note", text: L.loadNote });
+  const sr = h("p", { class: "sr-only", role: "status" });
+  const note = h("p", { class: "ai-load-note" });
   const cv = h("canvas", { class: "drafting-trace", "aria-hidden": "true" });
   const bar = (cls) => h("div", { class: `skel ${cls}` });
-  const plate = h("div", { class: "ai-loading" },
-    h("p", { class: "sr-only", role: "status", text: L.loadSr }),
-    h("div", { class: "drafting-head" }, cv,
-      h("div", null,
-        h("p", { class: "drafting-title", text: L.loadTitle }),
-        h("p", { class: "drafting-sub" }, L.loadSub(aiModelName()), " · ", elapsed))),
+  const plate = h("div", { class: "ai-loading" }, sr,
+    h("div", { class: "drafting-head" }, cv, h("div", null, chip, title, h("p", { class: "drafting-sub" }, sub, elapsed))),
     h("div", { class: "ai-skel", "aria-hidden": "true" },
       bar("ai-skel-head"), bar("ai-skel-line"), bar("ai-skel-line short"),
       h("div", { class: "ai-skel-hyp" }, bar("ai-skel-line"), bar("ai-skel-line short")),
       h("div", { class: "ai-skel-hyp" }, bar("ai-skel-line"), bar("ai-skel-line short"))),
     note);
+  let cur = null, t = null;
+  const clock = () => {
+    const running = cur.state === "running";
+    const sec = aiReqSeconds(cur);
+    elapsed.textContent = sec === null ? "" : ` · ${aiElapsed(sec, L.code)}`;
+    const n = !running ? L.queueNote : sec !== null && sec > 100 ? L.loadSlow : L.loadNote;
+    if (note.textContent !== n) note.textContent = n;
+  };
+  plate._update = (s) => {
+    cur = s;
+    const running = s.state === "running";
+    plate.dataset.state = s.state;
+    chip.className = `status status-${running ? "running" : "queued"} ai-q-chip`;
+    chip.textContent = running ? L.running : L.queuedPos(aiPos(s));
+    title.textContent = running ? L.loadTitle : L.queueTitle;
+    sub.textContent = running ? L.loadSub(aiModelName()) : L.queueSub;
+    const srText = running ? L.loadSr : L.queueSr(aiPos(s));
+    if (sr.textContent !== srText) sr.textContent = srText; // announced once per change, not per poll
+    if (t) t.setActivity(running ? 0.45 : 0.08);
+    clock();
+  };
   plate._start = () => {
-    trace(cv, { rows: 3, activity: 0.45, noise: 1.3, seed: hashString(`${uid}|ai`), colors: [COLORS.cyan, COLORS.green, COLORS.magenta] });
-    const tick = () => {
-      if (!plate.isConnected || aiStore.inflight.get(rec.jobId) !== rec) return;
-      const s = (performance.now() - rec.started) / 1000;
-      elapsed.textContent = `${Math.floor(s)} ${L.code === "ru" ? "с" : "s"}`;
-      if (s > 100 && note.textContent !== L.loadSlow) note.textContent = L.loadSlow;
-      later(tick, 500);
-    };
-    tick();
+    t = trace(cv, { rows: 3, activity: cur && cur.state === "running" ? 0.45 : 0.08, noise: 1.3, seed: hashString(`${uid}|ai`), colors: [COLORS.cyan, COLORS.green, COLORS.magenta] });
+    const loop = () => { if (!plate.isConnected) return; clock(); later(loop, 1000); };
+    later(loop, 1000);
   };
   return plate;
 }
+function aiRegenStrip(L, uid) {
+  const cv = h("canvas", { class: "ai-regen-trace", "aria-hidden": "true" });
+  const title = h("p", { class: "drafting-title" });
+  const elapsed = h("span", { class: "mono", "aria-hidden": "true" });
+  const strip = h("div", { class: "ai-regen-strip", role: "status" }, cv,
+    h("div", null, title, h("p", { class: "drafting-sub" }, L.regenNote, elapsed)));
+  let cur = null;
+  const clock = () => { const sec = aiReqSeconds(cur); elapsed.textContent = sec === null ? "" : ` · ${aiElapsed(sec, L.code)}`; };
+  strip._update = (s) => {
+    cur = s;
+    const r = s.request || {};
+    const text = s.state === "running" ? L.regenerating(r.language === "ru" || r.language === "en" ? r.language : L.code) : L.regenQueued(aiPos(s));
+    if (title.textContent !== text) title.textContent = text;
+    clock();
+  };
+  strip._start = () => {
+    trace(cv, { rows: 2, activity: 0.5, seed: hashString(`${uid}|regen`), colors: [COLORS.cyan, COLORS.magenta] });
+    const loop = () => { if (!strip.isConnected) return; clock(); later(loop, 1000); };
+    later(loop, 1000);
+  };
+  return strip;
+}
+
+// "Another interpretation is in progress": the server names the job that holds the account's slot.
+function aiInProgressBanner(L, err) {
+  const d = (err && err.details) || {};
+  const other = typeof d.job_id === "string" && d.job_id ? d.job_id : null;
+  let name = other ? aiStore.labels.get(other) || (typeof d.title === "string" && d.title) || null : null;
+  if (name && name.length > 48) name = `${name.slice(0, 47)}…`;
+  const link = other ? h("a", { class: "btn btn-sm", href: `#/job/${encodeURIComponent(other)}?ai=1`, text: name ? L.openRunNamed(name) : L.openThatRun }) : null;
+  return banner("info", L.err.INTERPRETATION_IN_PROGRESS, `${err.message} ${L.inProgressBody}`, { meta: errorMeta(err), actions: link ? [link] : [] });
+}
 
 /* ---------- the panel ---------- */
-function mountAiPanel(root, job, { autostart = false, scroll = false, onHas = null } = {}) {
+function mountAiPanel(root, job, { autostart = false, scroll = false, onState = null } = {}) {
   const gen = routeGen;
   const jobId = job.job_id;
   const uid = hashString(jobId).toString(36);
   const runLabel = job.title || job.prompt || planShort(job.plan) || jobId;
+  aiStore.labels.set(jobId, runLabel);
   const st = {
     lang: aiDefaultLang(job),
-    phase: "check", // check | check_error | empty | generating | result
-    data: null,
-    rec: null,
-    actionError: null,
-    checkError: null,
+    langFor: null,     // the request / result whose language last set the toggle
     pendingStart: autostart,
     pendingScroll: scroll,
     filter: "",
     digestOpen: false,
     fresh: false,
+    sig: null,         // what the panel was last fully built from
+    pollKey: null,
+    live: null,        // in-place updater of the queue plate / strip
   };
   const titleId = `ai-title-${uid}`;
   const section = h("section", { class: "ai-panel", "aria-labelledby": titleId });
+  const pollSlot = h("div", { class: "ai-poll" });
   root.append(section);
   const alive = () => gen === routeGen && section.isConnected;
+  const known = () => aiStore.status.get(jobId) || null;
 
-  function setData(d, fresh) {
-    st.data = d;
-    st.phase = "result";
-    st.fresh = fresh;
-    const ml = d.meta && d.meta.language;
-    if (ml === "ru" || ml === "en") st.lang = ml;
-    if (onHas) onHas(true, ml === "ru" || ml === "en" ? ml : null);
+  function post(regenerate) {
+    const s = known();
+    if (aiStore.posting.has(jobId) || (s && AI_ACTIVE.has(s.state))) return;
+    aiPost(jobId, st.lang, regenerate);
   }
 
-  function attach(rec) {
-    st.rec = rec;
-    st.lang = rec.lang;
-    st.actionError = null;
-    st.phase = st.data ? "result" : "generating";
-    paint();
-    rec.promise.then((d) => {
-      if (!alive()) return;
-      st.rec = null;
-      setData(d, true);
-      paint();
-    }, (err) => {
-      if (!alive()) return;
-      st.rec = null;
-      st.actionError = err;
-      st.phase = st.data ? "result" : "empty";
-      paint();
-    });
-  }
-
-  function generate(regenerate) {
-    if (st.rec) return;
-    attach(aiRequest(jobId, st.lang, regenerate, runLabel));
-  }
-
-  async function check() {
-    st.phase = "check";
-    st.checkError = null;
-    paint();
-    const cached = aiStore.cache.get(jobId);
-    const running = aiStore.inflight.get(jobId);
-    if (running) { if (cached) setData(cached, false); attach(running); return; }
-    if (cached) { setData(cached, false); paint(); return; }
-    try {
-      const { data } = await api(`/api/v1/jobs/${encodeURIComponent(jobId)}/interpretation`);
-      if (!alive()) return;
-      checkInterpretation(data, "GET /interpretation");
-      aiStore.cache.set(jobId, data);
-      setData(data, false);
-      paint();
-    } catch (err) {
-      if (!alive()) return;
-      // a request started meanwhile (hero button) owns the panel now
-      if (st.rec) return;
-      if (err instanceof ApiError && err.status === 404 && err.code === "INTERPRETATION_NOT_FOUND") {
-        st.phase = "empty";
-        if (onHas) onHas(false);
-        if (aiStore.errors.has(jobId)) st.actionError = aiStore.errors.get(jobId);
-        if (st.pendingStart) { st.pendingStart = false; generate(false); return; }
-        paint();
-        return;
+  // Every change of this job's state (poll, POST, error) lands here.
+  function changed(info = {}) {
+    if (!alive()) return;
+    const s = known();
+    if (s) {
+      // the toggle follows the active or failed request, then the result that arrives
+      const r = s.request;
+      const rk = r && r.id !== undefined ? `r${r.id}` : null;
+      const ml = s.result && s.result.meta && s.result.meta.language;
+      const mk = s.result ? `m${(s.result.meta && s.result.meta.created_at) || ""}` : null;
+      if (s.state !== "ready" && s.state !== "none" && rk && rk !== st.langFor && (r.language === "ru" || r.language === "en")) { st.lang = r.language; st.langFor = rk; }
+      else if ((s.state === "ready" || !rk) && mk && mk !== st.langFor && (ml === "ru" || ml === "en")) { st.lang = ml; st.langFor = mk; }
+      if (info.arrived) st.fresh = true;
+      if (onState) onState(s);
+      if (st.pendingStart) {
+        st.pendingStart = false;
+        if (s.state === "none") { post(false); return; } // post() emits, which paints
       }
-      st.phase = "check_error";
-      st.checkError = err;
-      paint();
     }
+    paint();
   }
+  aiSubscribe(section, jobId, (id, info) => { if (id === jobId) changed(info); });
 
-  function langSeg(L) {
+  function langSeg(L, locked) {
     const btns = ["ru", "en"].map((l) => h("button", {
       type: "button", role: "radio", "aria-checked": String(st.lang === l), "data-lang": l, lang: l,
-      text: l.toUpperCase(), title: l === "ru" ? "Русский" : "English", disabled: st.rec ? true : null,
+      text: l.toUpperCase(), title: l === "ru" ? "Русский" : "English", disabled: locked ? true : null,
     }));
     const seg = h("div", { class: "seg seg-sm", role: "radiogroup", "aria-label": L.langLabel }, btns);
     seg.addEventListener("click", (e) => {
       const b = e.target.closest("[data-lang]");
-      if (!b || st.rec || b.dataset.lang === st.lang) return;
+      if (!b || locked || b.dataset.lang === st.lang) return;
       st.lang = b.dataset.lang;
       state.aiLang = st.lang;
       paint();
@@ -2780,8 +3149,7 @@ function mountAiPanel(root, job, { autostart = false, scroll = false, onHas = nu
     return seg;
   }
 
-  function result(L) {
-    const d = st.data;
+  function resultView(L, d, busy) {
     const it = d.interpretation;
     const digest = isPlainObj(d.digest) ? d.digest : null;
     const warnings = normWarnings(d.evidence_warnings);
@@ -2799,7 +3167,7 @@ function mountAiPanel(root, job, { autostart = false, scroll = false, onHas = nu
         w.location ? h("b", { text: `${warnLoc(w.location, L)}: ` }) : null, w.message))));
     }
     if (digest) dd = digestDetails(st, L, () => Promise.resolve(digest), L.saw);
-    const content = h("div", { class: `ai-content${st.rec ? " busy" : ""}` },
+    const content = h("div", { class: `ai-content${busy ? " busy" : ""}` },
       digestErr ? banner("error", L.digestErrTitle, String(digestErr), { meta: "digest_error" }) : null,
       digestWarnings(digest).map((w) => banner("warn", w.coverage ? L.coverageTitle : L.digestWarnTitle, w.text, { meta: w.coverage ? "coverage.warning" : "digest warnings" })),
       evBanner,
@@ -2819,15 +3187,16 @@ function mountAiPanel(root, job, { autostart = false, scroll = false, onHas = nu
         return h("li", { class: ws.length ? "flagged" : null }, h("span", { text: x }), ws.length ? h("span", { class: "ev-flag", text: ws.map((w) => w.message).join("; ") }) : null);
       }))) : null,
       dd ? dd.el : banner("warn", L.saw, L.noDigest));
-    if (st.rec) content.inert = true;
+    // while a new result is made the old one stays readable but out of reach of the keyboard
+    if (busy) content.inert = true;
     // Claude's text is in the language it was generated in, whatever the labels are set to
     const dl = d.meta && d.meta.language;
     if (dl === "ru" || dl === "en") content.setAttribute("lang", dl);
     return content;
   }
 
-  function footer(L) {
-    const m = (st.data && st.data.meta) || {};
+  function footer(L, d) {
+    const m = (d && d.meta) || {};
     const bits = [];
     if (m.model) bits.push(h("span", null, m.model));
     if (typeof m.cost_usd === "number") bits.push(h("span", null, `$${m.cost_usd.toFixed(3)}`));
@@ -2838,61 +3207,136 @@ function mountAiPanel(root, job, { autostart = false, scroll = false, onHas = nu
     return bits.length ? h("footer", { class: "ai-foot mono" }, bits) : null;
   }
 
+  // A failed request: its reason, a Retry, and (when there is one) the previous result below.
+  function failBanner(L, s, hasResult, posting) {
+    const r = s.request || {};
+    const code = r.error_code || null;
+    const loaded = r.id !== undefined;
+    const msg = r.error_message || (loaded ? L.noFailMsg : L.loadingReason);
+    const regen = hasResult || r.regenerate === true || Boolean(s.resultError) || aiNeedsRegen({ code });
+    const retry = h("button", { class: "btn btn-sm", type: "button", disabled: posting ? true : null, text: posting ? L.sending : aiNeedsRegen({ code }) && !hasResult ? L.rebuild : L.retry, onclick: () => post(regen) });
+    if (code === "AI_BUDGET_EXHAUSTED") {
+      return budgetBanner({ code, message: msg }, L.code, { extra: hasResult ? L.failedPrev : null, actions: [retry, budgetUsageLink(null, L.code)] });
+    }
+    const meta = [code, r.finished_at ? absTime(r.finished_at) : null].filter(Boolean).join(" · ") || null;
+    return banner("error", (code && L.err[code]) || L.failedHead, [msg, hasResult ? L.failedPrev : null].filter(Boolean).join(" "), { meta, actions: [retry] });
+  }
+  // An error of the last POST (the request was not accepted).
+  function actionBanner(L, err, hasResult, posting) {
+    const stored = hasResult || Boolean((known() || {}).resultError);
+    const retry = h("button", { class: "btn btn-sm", type: "button", disabled: posting ? true : null, text: aiNeedsRegen(err) && !stored ? L.rebuild : L.retry, onclick: () => post(stored || aiNeedsRegen(err)) });
+    if (err.code === "AI_BUDGET_EXHAUSTED") return budgetBanner(err, L.code, { actions: [budgetUsageLink(err, L.code)] });
+    if (err.code === "INTERPRETATION_IN_PROGRESS") return aiInProgressBanner(L, err);
+    if (err.code === "QUEUE_FULL") {
+      const b = banner("warn", L.err.QUEUE_FULL, `${err.message} ${aiRetryNote(L, err) || L.queueFullBody}`, { meta: errorMeta(err), actions: [retry] });
+      return b;
+    }
+    return aiErrorBanner(L, err, [retry]);
+  }
+
+  // Connection trouble while following a request: its own slot, updated in place.
+  function paintPoll(L, s, pe) {
+    const key = pe ? `${L.code}|${Boolean(s)}|${pe.stopped ? `stop|${pe.err.code}|${pe.err.message}` : `retry|${pe.attempt}`}` : "";
+    if (key === st.pollKey) return;
+    st.pollKey = key;
+    // with no state at all, a stopped check is the panel's main message (see paint)
+    if (!pe || (pe.stopped && !s)) { pollSlot.replaceChildren(); return; }
+    pollSlot.replaceChildren(pe.stopped
+      ? aiErrorBanner(L, pe.err, [h("button", { class: "btn btn-sm", type: "button", text: L.resume, onclick: () => aiResume(jobId) })], L.pollStopped)
+      : banner("info", L.pollRetryTitle, L.pollRetry(pe.attempt), { meta: errorMeta(pe.err) }));
+  }
+
   function paint() {
     if (!alive()) return;
+    const s = known();
+    const pe = aiStore.pollErrors.get(jobId) || null;
+    const err = aiStore.errors.get(jobId) || null;
+    const posting = aiStore.posting.has(jobId);
     const L = aiT(st.lang);
-    const busy = Boolean(st.rec) || st.phase === "check";
+    const r = s && s.request;
+    const res = s && s.result;
+    const sig = JSON.stringify([st.lang, s && s.state, r && r.id, r && r.status, r && r.error_code, r && r.error_message,
+      res ? `${(res.meta && res.meta.created_at) || ""}|${(res.meta && res.meta.language) || ""}|${res.interpretation.headline || ""}` : null,
+      err ? `${err.code}|${err.message}` : null, posting, !s && pe && pe.stopped ? `${pe.err.code}|${pe.err.message}` : null, s && s.resultError]);
+    paintPoll(L, s, pe);
+    if (sig === st.sig) {
+      if (st.live && s) st.live(s); // position, timers: in place
+      return;
+    }
+    st.sig = sig;
+    st.live = null;
+    const kind = s ? s.state : null;
+    const active = AI_ACTIVE.has(kind);
+    const locked = active || posting;
     section.setAttribute("lang", L.code);
-    section.setAttribute("aria-busy", String(busy));
+    section.setAttribute("aria-busy", String(locked || !s));
     section.classList.toggle("arrive", st.fresh && !isReduced());
-    const d = st.data;
-    const regenBtn = st.phase === "result" ? h("button", {
-      class: "btn btn-sm ai-regen", type: "button", disabled: st.rec ? true : null,
-      text: d && d.meta && d.meta.language && d.meta.language !== st.lang ? L.regenerateIn : L.regenerate,
-      onclick: () => generate(true),
+    const regenBtn = res ? h("button", {
+      class: "btn btn-sm ai-regen", type: "button", disabled: locked ? true : null,
+      text: res.meta && res.meta.language && res.meta.language !== st.lang ? L.regenerateIn : L.regenerate,
+      onclick: () => post(true),
     }) : null;
     const head = h("header", { class: "ai-head" },
       h("div", null,
         h("p", { class: "eyebrow ai-eyebrow" }, h("span", { class: "ai-glyph", "aria-hidden": "true" }), L.eyebrow),
         h("h2", { class: "display ai-title", id: titleId, tabindex: "-1", text: L.title })),
-      h("div", { class: "ai-tools" }, langSeg(L), regenBtn));
-    const parts = [head, aiStamp(L, d ? d.disclaimer : undefined), aiLegend(L)];
-    // After INTERPRETATION_CORRUPT or DIGEST_ERROR the retry sends regenerate:true, the only
-    // request the server recovers from.
-    const regenAfter = (err) => Boolean(st.data) || aiNeedsRegen(err);
-    const retryGen = (err) => h("button", { class: "btn btn-sm", type: "button", text: aiNeedsRegen(err) && !st.data ? L.rebuild : L.retry, onclick: () => generate(regenAfter(err)) });
-    if (st.actionError) parts.push(aiErrorBanner(L, st.actionError, [retryGen(st.actionError)]));
-    if (st.phase === "check") {
-      parts.push(h("div", { class: "launching" }, h("span", { class: "spinner", "aria-hidden": "true" }), h("span", { text: L.checking })));
-    } else if (st.phase === "check_error") {
-      parts.push(aiErrorBanner(L, st.checkError, [
-        h("button", { class: "btn btn-sm", type: "button", text: L.retry, onclick: check }),
-        h("button", { class: "btn btn-sm btn-ghost", type: "button", text: aiNeedsRegen(st.checkError) ? L.replaceCorrupt : L.generateAnyway, onclick: () => generate(aiNeedsRegen(st.checkError)) }),
-      ], st.checkError && st.checkError.code && L.err[st.checkError.code] ? null : L.err.check));
-    } else if (st.phase === "empty") {
+      h("div", { class: "ai-tools" }, langSeg(L, locked), regenBtn));
+    const parts = [head, aiStamp(L, res ? res.disclaimer : undefined), aiLegend(L)];
+    if (err) parts.push(actionBanner(L, err, Boolean(res), posting));
+    parts.push(pollSlot);
+    if (s && s.resultError) {
+      // the stored hypotheses exist but cannot be read; a new request replaces them
+      parts.push(banner("error", L.err.INTERPRETATION_CORRUPT, s.resultError, {
+        meta: "result_error",
+        actions: active || kind === "failed" ? [] : [h("button", { class: "btn btn-sm", type: "button", disabled: posting ? true : null, text: L.replaceCorrupt, onclick: () => post(true) })],
+      }));
+    }
+    if (!s) {
+      if (pe && pe.stopped) {
+        // the first read failed: say why, offer to read again or to ask for new hypotheses
+        parts.push(aiErrorBanner(L, pe.err, [
+          h("button", { class: "btn btn-sm", type: "button", text: L.retry, onclick: () => aiResume(jobId) }),
+          h("button", { class: "btn btn-sm btn-ghost", type: "button", disabled: posting ? true : null, text: aiNeedsRegen(pe.err) ? L.replaceCorrupt : L.generateAnyway, onclick: () => post(aiNeedsRegen(pe.err)) }),
+        ], pe.err && pe.err.code && L.err[pe.err.code] ? null : L.err.check));
+      } else {
+        parts.push(h("div", { class: "launching" }, h("span", { class: "spinner", "aria-hidden": "true" }), h("span", { text: L.checking })));
+      }
+    } else if (kind === "none") {
       const model = aiModelName();
-      const gen2 = h("button", { class: "btn btn-primary ai-gen", type: "button", onclick: () => generate(aiNeedsRegen(st.actionError)) },
-        h("span", { class: "ai-glyph", "aria-hidden": "true" }), h("span", { text: L.generate }),
+      const q = state.caps && state.caps.interpret_queue;
+      const waitingInLab = q && Number.isFinite(q.queued) && Number.isFinite(q.running) && q.queued + q.running > 0;
+      const qErr = state.caps && state.caps.interpret_queue_error;
+      const genBtn = h("button", { class: "btn btn-primary ai-gen", type: "button", disabled: posting ? true : null, onclick: () => post(aiNeedsRegen(err)) },
+        h("span", { class: "ai-glyph", "aria-hidden": "true" }), h("span", { text: posting ? L.sending : L.generate }),
         model ? h("span", { class: "ai-model mono", text: model }) : null);
-      parts.push(h("div", { class: "ai-empty" }, h("p", { class: "ai-intro", text: L.intro }), h("div", { class: "ai-actions" }, gen2)));
+      parts.push(h("div", { class: "ai-empty" },
+        h("p", { class: "ai-intro", text: L.intro }),
+        h("div", { class: "ai-actions" }, genBtn),
+        waitingInLab ? h("p", { class: "ai-queue-hint mono", text: L.labQueue(q.queued, q.running) }) : null,
+        qErr ? h("p", { class: "ai-inline-warn", text: `${L.queueUnknown}: ${qErr}` }) : null));
       parts.push(digestDetails(st, L, () => fetchDigest(jobId), L.willSee).el);
-    } else if (st.phase === "generating") {
-      parts.push(aiLoadingPlate(L, st.rec, uid));
-    } else if (st.phase === "result") {
-      if (st.rec) {
-        const cv = h("canvas", { class: "ai-regen-trace", "aria-hidden": "true" });
-        const strip = h("div", { class: "ai-regen-strip", role: "status" }, cv,
-          h("div", null, h("p", { class: "drafting-title", text: L.regenerating(st.rec.lang) }), h("p", { class: "drafting-sub", text: L.regenNote })));
-        strip._start = () => trace(cv, { rows: 2, activity: 0.5, seed: hashString(`${uid}|regen`), colors: [COLORS.cyan, COLORS.magenta] });
+    } else if (active && !res) {
+      const plate = aiQueuePlate(L, uid);
+      st.live = (x) => plate._update(x);
+      parts.push(plate);
+    } else if (kind === "failed" && !res) {
+      parts.push(failBanner(L, s, false, posting));
+      parts.push(digestDetails(st, L, () => fetchDigest(jobId), L.willSee).el);
+    } else {
+      // a result: ready, or the previous one next to an active or failed request
+      if (active) {
+        const strip = aiRegenStrip(L, uid);
+        st.live = (x) => strip._update(x);
         parts.push(strip);
       }
-      parts.push(result(L));
-      parts.push(footer(L));
+      if (kind === "failed") parts.push(failBanner(L, s, true, posting));
+      parts.push(resultView(L, res, active), footer(L, res));
     }
     section.replaceChildren(...parts.filter(Boolean));
+    if (st.live) st.live(s);
     section.querySelectorAll(".ai-loading, .ai-regen-strip").forEach((el) => el._start && el._start());
     if (st.fresh) { st.fresh = false; arrive(); }
-    if (st.pendingScroll && st.phase !== "check") {
+    if (st.pendingScroll && s) {
       st.pendingScroll = false;
       requestAnimationFrame(() => api_.reveal());
     }
@@ -2907,10 +3351,11 @@ function mountAiPanel(root, job, { autostart = false, scroll = false, onHas = nu
   }
 
   const api_ = {
+    // The run page's hero button: ask for hypotheses when there are none and none are coming.
     start() {
-      if (st.rec || st.phase === "result" || st.phase === "generating") return;
-      if (st.phase === "check") { st.pendingStart = true; return; }
-      generate(false);
+      const s = known();
+      if (!s) { st.pendingStart = true; return; }
+      if (s.state === "none" || (s.state === "failed" && !s.result)) post(aiNeedsRegen({ code: s.request && s.request.error_code }));
     },
     reveal() {
       section.scrollIntoView({ behavior: isReduced() ? "auto" : "smooth", block: "start" });
@@ -2918,7 +3363,11 @@ function mountAiPanel(root, job, { autostart = false, scroll = false, onHas = nu
       if (t) t.focus({ preventScroll: true });
     },
   };
-  check();
+  // State comes from the server every time the panel mounts; a view already following this job
+  // on this page shares its poll loop.
+  const s0 = known();
+  if (!s0 || AI_ACTIVE.has(s0.state) || (s0.state === "failed" && !s0.full)) aiWatch(jobId);
+  changed();
   return api_;
 }
 
@@ -2951,86 +3400,153 @@ function aiCta(slot, job) {
   enter(cta, { y: 12, duration: DUR.enter, delay: isReduced() ? 0 : 900 });
 }
 
-/* ---------- Library cards: interpret in place, then "View hypotheses" ---------- */
-// A run with hypotheses is labelled in their language (this session's result, else the stored
-// language from history); a run without uses the default language.
+/* ---------- Library cards: queue state in place, without opening the run ---------- */
+// A card is labelled in the language of its hypotheses (this page's result, else history's), or
+// of the request on its way; a run without either uses the default language.
 function cardLang(job) {
-  const cached = aiStore.cache.get(job.job_id);
-  const ml = cached && cached.meta && cached.meta.language;
+  const s = aiStore.status.get(job.job_id);
+  const ml = s && s.result && s.result.meta && s.result.meta.language;
   if (ml === "ru" || ml === "en") return ml;
+  const rl = s && s.request && s.request.language;
+  if (rl === "ru" || rl === "en") return rl;
   if (job.has_interpretation === true && (job.interpretation_language === "ru" || job.interpretation_language === "en")) return job.interpretation_language;
   return aiDefaultLang(job);
 }
 function cardAi(job, thumbTop, label) {
   if (job.status !== "succeeded") return null;
   const jobId = job.job_id;
+  aiStore.labels.set(jobId, label);
   const box = h("div", { class: "card-ai" });
   const href = `#/job/${encodeURIComponent(jobId)}?ai=1`;
-  let marker = null;
+  const hist = aiHistState(job);
+  const histBad = hist !== null && !AI_STATES.has(hist);
+  // history is fresher than anything this page knows, unless a view here already read the server
+  if (!histBad && hist && hist !== "ready" && !aiStore.status.has(jobId)) {
+    aiStore.status.set(jobId, { state: hist, request: null, result: null, full: false });
+  }
+  let marker = null, sig = null, lastKind = null;
   const mark = (on, isNew, L) => {
     if (!on || marker) return;
     marker = h("span", { class: `ai-mark${isNew ? " new" : ""}`, title: L.markTitle, text: "AI" });
     thumbTop.append(marker);
   };
-  function paint(isNew = false) {
+  const viewLink = (L) => h("a", { class: "card-ai-link", href }, h("span", { class: "ai-glyph", "aria-hidden": "true" }), h("span", { text: L.viewHyp }), h("span", { class: "arrow", "aria-hidden": "true", text: "→" }));
+
+  function paint(info = {}) {
     const lang = cardLang(job);
     const L = aiT(lang);
+    const s = aiStore.status.get(jobId) || null;
+    const kind = s ? s.state : hist;
+    const req = (s && s.request) || null;
+    let hasResult = job.has_interpretation === true || hist === "ready";
+    if (s && s.full) hasResult = Boolean(s.result);
+    else if (s && s.result) hasResult = true;
+    const stored = hasResult || Boolean(s && s.resultError); // a result exists, readable or not
+    const err = aiStore.errors.get(jobId) || null;
+    const pe = aiStore.pollErrors.get(jobId) || null;
+    const posting = aiStore.posting.has(jobId);
+    const other = kind === null || kind === "none" ? aiOtherActive(jobId) : null;
+    const next = JSON.stringify([lang, kind, req && req.id, req && req.status, req && req.position, req && req.error_code, req && req.error_message,
+      hasResult, s && s.resultError, err ? `${err.code}|${err.message}` : null, pe ? (pe.stopped ? `stop|${pe.err.message}` : "retry") : null, posting, other]);
+    mark(hasResult, info.arrived === true, L);
+    if (next === sig) return;
+    sig = next;
     box.setAttribute("lang", L.code);
-    const rec = aiStore.inflight.get(jobId);
-    const has = job.has_interpretation === true || aiStore.cache.has(jobId);
-    mark(has, isNew, L);
-    if (rec) {
+    box.dataset.state = kind || "none";
+    // a failure seen happening is announced; one read from history on page load is just shown
+    const justFailed = kind === "failed" && AI_ACTIVE.has(lastKind);
+    lastKind = kind;
+    const rows = [];
+    if (histBad && !s) {
+      rows.push(h("p", { class: "card-ai-err", role: "alert" }, h("b", { text: L.badState(String(hist)) }),
+        h("span", { class: "mono card-ai-meta", text: "interpretation_state" })));
+    }
+    if (pe && pe.stopped) {
+      rows.push(h("p", { class: "card-ai-err", role: "alert" }, h("b", { text: `${L.pollStopped}: ` }), pe.err.message || String(pe.err),
+        errorMeta(pe.err) ? h("span", { class: "mono card-ai-meta", text: errorMeta(pe.err) }) : null));
+      rows.push(h("button", { class: "btn btn-sm btn-ghost", type: "button", text: L.resume, onclick: () => aiResume(jobId) }));
+    }
+    if (err) rows.push(cardErr(L, err));
+    if (s && s.resultError) {
+      rows.push(h("p", { class: "card-ai-err" }, h("b", { text: `${L.err.INTERPRETATION_CORRUPT}: ` }), s.resultError,
+        h("span", { class: "mono card-ai-meta", text: "result_error" })));
+    }
+    const retryBtn = (regen, text, reqLang) => {
+      const b = h("button", { class: "btn btn-sm card-ai-btn", type: "button", disabled: posting ? true : null, "aria-label": `${text}: ${label}` },
+        h("span", { class: "ai-glyph", "aria-hidden": "true" }), h("span", { text: posting ? L.sending : text }));
+      b.addEventListener("click", () => aiPost(jobId, reqLang || lang, regen));
+      return b;
+    };
+    if (AI_ACTIVE.has(kind)) {
+      // queued or running: where it is, and for how long (the seconds are not announced)
       const secs = h("span", { class: "mono dim", "aria-hidden": "true" });
-      box.replaceChildren(h("div", { class: "card-ai-busy" },
-        h("span", { class: "spinner", "aria-hidden": "true" }),
-        h("span", { role: "status", text: `${L.interpreting}…` }), secs));
+      if (hasResult) rows.push(viewLink(L));
+      rows.push(h("div", { class: "card-ai-busy" },
+        h("span", { class: `spinner${kind === "queued" ? " spinner-slow" : ""}`, "aria-hidden": "true" }),
+        h("span", { role: "status", text: kind === "running" ? L.running : L.queuedPos(aiPos(s)) }), secs,
+        pe && !pe.stopped ? h("span", { class: "card-ai-note", text: L.reconnecting }) : null));
       const tick = () => {
-        if (aiStore.inflight.get(jobId) !== rec) return;
-        secs.textContent = `${Math.floor((performance.now() - rec.started) / 1000)} ${L.code === "ru" ? "с" : "s"}`;
-        if (box.isConnected || !box.parentNode) later(tick, 1000);
+        if (!secs.isConnected && secs._seen) return; // repainted or gone
+        if (secs.isConnected) secs._seen = true;
+        const sec = aiReqSeconds(aiStore.status.get(jobId));
+        secs.textContent = sec === null ? "" : aiElapsed(sec, L.code);
+        later(tick, 1000);
       };
       tick();
-      rec.promise.then(() => { if (box.isConnected) paint(true); }, () => { if (box.isConnected) paint(); });
-      return;
-    }
-    if (has) {
-      box.replaceChildren(h("a", { class: "card-ai-link", href }, h("span", { class: "ai-glyph", "aria-hidden": "true" }), h("span", { text: L.viewHyp }), h("span", { class: "arrow", "aria-hidden": "true", text: "→" })));
-      if (isNew) enter(box.firstChild, { y: 6, duration: DUR.view });
-      return;
-    }
-    // The server runs one interpretation per account at a time: while another run's is in
-    // flight this card waits (and repaints when that one settles) instead of failing with 429.
-    const other = [...aiStore.inflight.values()].find((r) => r.jobId !== jobId);
-    if (other) {
-      box.replaceChildren(h("div", { class: "card-ai-wait" },
-        h("button", { class: "btn btn-sm card-ai-btn", type: "button", disabled: true, "aria-describedby": `wait-${hashString(jobId).toString(36)}` },
+    } else if (kind === "failed") {
+      const loaded = Boolean(req && req.id !== undefined);
+      const code = req && req.error_code;
+      const why = loaded ? req.error_message || L.noFailMsg : L.loadingReason;
+      rows.push(h("p", { class: `card-ai-err${code === "AI_BUDGET_EXHAUSTED" ? " warn" : ""}`, role: justFailed ? "alert" : null },
+        h("b", { text: `${L.failed}: ` }), why,
+        code ? h("span", { class: "mono card-ai-meta", text: code }) : null));
+      if (hasResult) rows.push(viewLink(L));
+      rows.push(retryBtn(stored || (req && req.regenerate === true) || aiNeedsRegen({ code }), aiNeedsRegen({ code }) && !stored ? L.rebuild : L.retry, req && req.language));
+    } else if (hasResult) {
+      rows.push(viewLink(L));
+      if (info.arrived) requestAnimationFrame(() => enter(rows[rows.length - 1], { y: 6, duration: DUR.view }));
+    } else if (other) {
+      // one interpretation per account: this card waits for the one on its way
+      const wid = `wait-${hashString(jobId).toString(36)}`;
+      rows.push(h("div", { class: "card-ai-wait" },
+        h("button", { class: "btn btn-sm card-ai-btn", type: "button", disabled: true, "aria-describedby": wid },
           h("span", { class: "ai-glyph", "aria-hidden": "true" }), h("span", { text: L.interpret })),
-        h("p", { class: "card-ai-note", id: `wait-${hashString(jobId).toString(36)}`, text: L.waitingFor(other.label) })));
-      other.promise.then(() => { if (box.isConnected) paint(); }, () => { if (box.isConnected) paint(); });
-      return;
+        h("p", { class: "card-ai-note", id: wid, text: L.waitingFor(aiStore.labels.get(other) || other) })));
+    } else if (s && s.resultError) {
+      rows.push(retryBtn(true, L.replaceCorrupt));
+    } else if (!(histBad && !s)) {
+      rows.push(retryBtn(aiNeedsRegen(err), aiNeedsRegen(err) ? L.rebuild : err && err.code !== "INTERPRETATION_IN_PROGRESS" ? L.retry : L.interpret));
     }
-    const err = aiStore.errors.get(jobId);
-    const regen = aiNeedsRegen(err);
-    const btn = h("button", { class: "btn btn-sm card-ai-btn", type: "button", "aria-label": `${L.interpret}: ${label}` },
-      h("span", { class: "ai-glyph", "aria-hidden": "true" }), h("span", { text: regen ? L.rebuild : err ? L.retry : L.interpret }));
-    btn.addEventListener("click", () => {
-      aiRequest(jobId, lang, regen, label);
-      // every card on the page repaints: this one shows progress, the others wait
-      document.querySelectorAll(".card-ai").forEach((b) => b !== box && b._paint && b._paint());
-      paint();
-    });
-    const note = err ? aiRetryNote(L, err) : null;
-    // replaceChildren() would print a null child as the text "null": only pass real nodes
-    box.replaceChildren(...[
-      err ? h("p", { class: "card-ai-err", role: "alert" },
-        h("b", { text: aiErrTitle(L, err) }), " ",
-        err.message || String(err),
-        note ? ` ${note}` : "",
-        errorMeta(err) ? h("span", { class: "mono card-ai-meta", text: errorMeta(err) }) : null) : null,
-      btn].filter(Boolean));
+    box.replaceChildren(...rows);
   }
-  box._paint = () => paint();
+  // A compact version of the panel's POST errors.
+  function cardErr(L, err) {
+    const d = err.details || {};
+    if (err.code === "AI_BUDGET_EXHAUSTED") {
+      const T = BUDGET_T[L.code] || BUDGET_T.en;
+      const when = fmtResetAt(d.resets_at, L.code);
+      const title = d.scope === "user" ? T.user : d.scope === "global" ? T.global : T.title;
+      return h("p", { class: "card-ai-err warn", role: "alert" }, h("b", { text: `${title}. ` }),
+        when ? (d.scope === "global" ? T.pausedGlobal(when) : T.pausedUser(when)) : err.message,
+        h("span", { class: "mono card-ai-meta", text: errorMeta(err) }));
+    }
+    if (err.code === "INTERPRETATION_IN_PROGRESS") {
+      const other = typeof d.job_id === "string" && d.job_id ? d.job_id : null;
+      const name = other ? aiStore.labels.get(other) || (typeof d.title === "string" && d.title) || null : null;
+      return h("p", { class: "card-ai-err info", role: "alert" }, h("b", { text: `${L.err.INTERPRETATION_IN_PROGRESS}. ` }), err.message, " ",
+        other ? h("a", { class: "card-ai-inline-link", href: `#/job/${encodeURIComponent(other)}?ai=1`, text: name ? L.openRunNamed(name.length > 40 ? `${name.slice(0, 39)}…` : name) : L.openThatRun }) : null,
+        h("span", { class: "mono card-ai-meta", text: errorMeta(err) }));
+    }
+    const note = aiRetryNote(L, err) || (err.code === "QUEUE_FULL" ? L.queueFullBody : null);
+    return h("p", { class: "card-ai-err", role: "alert" },
+      h("b", { text: `${aiErrTitle(L, err)}: ` }), err.message || String(err), note ? ` ${note}` : "",
+      errorMeta(err) ? h("span", { class: "mono card-ai-meta", text: errorMeta(err) }) : null);
+  }
+  aiSubscribe(box, jobId, (id, info) => paint(id === jobId ? info : {}));
   paint();
+  // queued/running: follow it; failed as told by history: read the reason once
+  const s = aiStore.status.get(jobId);
+  if (s && (AI_ACTIVE.has(s.state) || (s.state === "failed" && !s.full))) aiWatch(jobId);
   return box;
 }
 
@@ -3073,10 +3589,54 @@ async function renderAccount() {
       stat("Running", fmtInt(st.running)),
       stat("Failed", fmtInt(st.failed), st.failed ? "tile-bad" : "")),
     h("p", { class: "muted" }, "Last run: ", h("span", { text: st.last_job_at ? `${relTime(st.last_job_at)} (${absTime(st.last_job_at)})` : "none yet" })),
+    usageSection(state.me),
     h("div", { class: "acct-actions" }, h("a", { class: "btn btn-primary", href: "#/history", text: "Open your library" }), signout));
   stagger([...root.children].filter((c) => !c.classList.contains("tiles")), { step: 70, y: 12, duration: DUR.enter });
   stagger(root.querySelectorAll(".tile"), { start: 120, step: 60, y: 12, duration: DUR.enter });
   root.querySelectorAll(".tile-value").forEach((v, i) => countUp(v, { duration: 900, delay: 150 + i * 60 }));
+}
+
+/* Today's AI usage against the account's rolling 24-hour budget (GET /api/v1/me ai_usage). Text
+   carries the numbers and the state; the bar and its colour only repeat them. */
+function usageSection(me) {
+  const uerr = me && me.ai_usage_error;
+  if (uerr) return banner("error", "Your AI usage could not be read", String(uerr), { meta: "ai_usage_error" });
+  const u = me ? me.ai_usage : undefined;
+  if (u === undefined || u === null) return null; // a server without the AI budget
+  const ok = typeof u === "object" && typeof u.spent_24h_usd === "number" && typeof u.budget_24h_usd === "number"
+    && Number.isFinite(u.spent_24h_usd) && Number.isFinite(u.budget_24h_usd) && u.spent_24h_usd >= 0 && u.budget_24h_usd >= 0;
+  if (!ok) {
+    return banner("error", "Your AI usage could not be read", `GET /api/v1/me returned ai_usage = ${JSON.stringify(u).slice(0, 200)}`, { meta: "ai_usage" });
+  }
+  const spent = u.spent_24h_usd;
+  const budget = u.budget_24h_usd;
+  const frac = budget > 0 ? spent / budget : spent > 0 ? Infinity : 1;
+  const level = u.exhausted === true || frac >= 1 ? "out" : frac >= 0.8 ? "high" : "ok";
+  const pct = budget > 0 ? Math.round(Math.min(frac, 9.99) * 100) : null;
+  const when = fmtResetAt(u.resets_at, "en");
+  const stateText = level === "out" ? "Used up" : level === "high" ? "Nearly used up" : "Available";
+  const resetText = level === "out"
+    ? (when ? `Claude is paused for your account until ${when}.` : "Claude is paused for your account. The server did not say until when.")
+    : when ? `Resets ${when}.` : spent > 0 ? "" : "Nothing spent in the last 24 hours.";
+  const caps = state.caps;
+  return h("section", { class: `usage usage-${level}`, "aria-labelledby": "usage-title" },
+    h("div", { class: "usage-head" },
+      h("div", null,
+        h("p", { class: "eyebrow usage-eyebrow" }, h("span", { class: "ai-glyph", "aria-hidden": "true" }), "Claude · rolling 24 hours"),
+        h("h2", { class: "section-title", id: "usage-title", text: "AI usage today" })),
+      h("p", { class: "usage-num" }, h("span", { class: "usage-spent", text: fmtUsd(spent) }), h("span", { class: "usage-of", text: `of ${fmtUsd(budget)}` }))),
+    h("div", {
+      class: "meter", role: "meter", "aria-labelledby": "usage-title",
+      "aria-valuemin": "0", "aria-valuemax": String(budget), "aria-valuenow": String(Math.min(spent, budget)),
+      "aria-valuetext": `${fmtUsd(spent)} of ${fmtUsd(budget)} used${pct !== null ? ` (${pct}%)` : ""}`,
+    }, h("i", { class: "meter-fill", style: `--f:${Math.max(0, Math.min(1, frac)).toFixed(4)}` })),
+    h("div", { class: "usage-foot" },
+      h("span", { class: "usage-state mono" }, h("i", { class: "usage-dot", "aria-hidden": "true" }), pct !== null ? `${stateText} · ${pct}%` : stateText),
+      resetText ? h("span", { class: "usage-reset", text: resetText }) : null),
+    h("p", { class: "muted small usage-note", text: "Plans drafted by Claude and AI hypotheses count against this budget; simulator runs and the Advanced form do not." }),
+    caps && caps.ai_budget_available === false
+      ? banner("warn", "The lab’s daily AI budget is used up", "Claude is paused for every account until spending from the last 24 hours ages out, even where an account’s own budget has room.")
+      : null);
 }
 
 /* ================================================================== */

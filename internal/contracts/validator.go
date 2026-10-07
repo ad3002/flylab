@@ -55,6 +55,57 @@ type Validator struct {
 	schema   *jsonschema.Schema
 	registry *Registry
 	limits   PlanLimits
+	// neurons, when set, is the connectome's root id set: explicit neuron_ids outside it are
+	// rejected (*UnknownNeuronsError). The server always sets it at startup (cmd/flylab); a
+	// validator without it (unit tests of the schema) checks only the shape of ids.
+	neurons *NeuronIDSet
+}
+
+// SetNeuronIDs enables the neuron id existence check (contract v4 section 5).
+func (v *Validator) SetNeuronIDs(set *NeuronIDSet) { v.neurons = set }
+
+// NeuronIDs returns the configured root id set (nil when the check is off).
+func (v *Validator) NeuronIDs() *NeuronIDSet { return v.neurons }
+
+// unknownNeurons collects explicit neuron_ids that are not in the connectome, per selector.
+func (v *Validator) unknownNeurons(plan *domain.ExperimentPlan) error {
+	if v.neurons == nil {
+		return nil
+	}
+	e := &UnknownNeuronsError{}
+	seen := map[string]bool{}
+	check := func(path string, sel domain.Selector) {
+		var bad []string
+		local := map[string]bool{}
+		for _, raw := range sel.NeuronIDs {
+			id := strings.TrimSpace(raw)
+			if id == "" || v.neurons.Has(id) || local[id] {
+				continue
+			}
+			local[id] = true
+			bad = append(bad, id)
+			if !seen[id] {
+				seen[id] = true
+				e.IDs = append(e.IDs, id)
+			}
+		}
+		if len(bad) > 0 {
+			e.Fields = append(e.Fields, UnknownNeuronField{Path: path, IDs: bad})
+		}
+	}
+	for i, a := range plan.Activation {
+		check(fmt.Sprintf("activation[%d].selector", i), a.Selector)
+	}
+	for i, s := range plan.Silencing {
+		check(fmt.Sprintf("silencing[%d].selector", i), s.Selector)
+	}
+	for i, r := range plan.Readout {
+		check(fmt.Sprintf("readout[%d].selector", i), r.Selector)
+	}
+	if len(e.IDs) > 0 {
+		return e
+	}
+	return nil
 }
 
 // PlanLimits are the numeric limits of contracts/experiment-plan.schema.json, read from the
@@ -247,6 +298,9 @@ func (v *Validator) ValidatePlan(plan *domain.ExperimentPlan) (*ValidationResult
 	}
 	if plan.ExperimentType == "compare_silencing" && len(plan.Silencing) == 0 {
 		return nil, fmt.Errorf("compare_silencing requires at least 1 silencing selector")
+	}
+	if err := v.unknownNeurons(plan); err != nil {
+		return nil, err
 	}
 
 	// Resolve Selectors

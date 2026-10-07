@@ -31,10 +31,14 @@ Designed for deployment at **`flylab.aglabx.com`** and public distribution via [
   - Claude decides `ready` / `needs_input` / `unsupported` (whole-animal behaviour such as walking or flight is out of scope); there are no keyword pre-filters.
   - No silent fallback: planner failures return `502 LLM_ERROR` with the reason; only a missing `claude` binary switches to a keyword parser, and that response carries a visible `llm_error`.
   - Global concurrency cap (`LLM_MAX_CONCURRENCY`, `503 LLM_BUSY`) and a per-user hourly limit (`PARSE_RATE_LIMIT_PER_HOUR`, `429 RATE_LIMITED`).
+  - Prompt guardrails (contract `docs/v4_guardrails.md`): the user's text reaches Claude only inside a `<untrusted_request id="…">` block with a fresh random nonce per call, the system prompts treat it as data, and the free-text fields have hard length caps (planner `message` ≤ 500 characters) in the JSON schema and re-checked by the server (`502 LLM_ERROR` naming the field, never truncated).
+  - Rolling 24 h AI budget in USD from the CLI's `total_cost_usd` (`AI_DAILY_BUDGET_USD`, `AI_USER_DAILY_BUDGET_USD`; `429 AI_BUDGET_EXHAUSTED`); every call is recorded in `llm_usage`.
+  - Explicit FlyWire root ids are checked against the v630 connectome: unknown ids are `422 VALIDATION_FAILED` (`details.unknown_neuron_ids`) on validate and a `needs_input` question from the planner.
 - **AI Hypotheses about a Run (`internal/interpret`, contract `docs/v3_interpretation.md`)**:
   - A deterministic digest of every succeeded run (totals, activity by FlyWire super class / cell class / neurotransmitter, top neurons with annotations, first-spike latency, synaptic hops and signed direct input from the stimulated and silenced sets via `flysim digest`, readouts with literature-backed behavioural proxies, annotation coverage, model facts) is sent to `claude -p` (`claude-opus-5-5` by default).
   - Claude returns observations and falsifiable hypotheses with calibrated confidence, evidence and a runnable follow-up plan; each plan is re-validated (`plan_id` or a visible `plan_error`), and evidence naming neuron ids absent from the digest is flagged in `evidence_warnings`. Every answer carries a fixed disclaimer: these are AI-generated hypotheses about a model, not biological findings.
   - Runs finished before v3 are interpretable without re-running: `digest_graph.json` is computed lazily from the stored `spikes.parquet` (a missing file is a visible `digest_error`).
+  - Interpretations run on a persisted queue with their own worker (`INTERPRET_CONCURRENCY`, default 1), separate from the planner's slots: `POST` answers `202 {state:"queued"|"running", request}` and the UI polls `GET`. One active request per account (`409 INTERPRETATION_IN_PROGRESS`), at most `INTERPRET_QUEUE_MAX` waiting (`503 QUEUE_FULL`); a request interrupted by a restart is shown as failed `WORKER_INTERRUPTED` (no automatic paid re-run).
 - **Accounts & History**:
   - Username/password accounts (PBKDF2-SHA256, 210 000 iterations), 30-day sessions via an `HttpOnly` cookie or `Authorization: Bearer`.
   - Every job belongs to its creator; other users get `404`. `GET /api/v1/jobs` is a per-user history with the stored plan and a compact result summary (a corrupt `summary.json` is reported in `summary_error`, never dropped).
@@ -202,6 +206,15 @@ All settings are environment variables (see `.env.example`). A variable that is 
 | `INTERPRET_RATE_LIMIT_PER_HOUR` | `20` | new interpretations per user per hour (cached answers are free; `429`, `scope=user`) |
 | `INTERPRET_RATE_LIMIT_PER_IP_PER_HOUR` | `40` | new interpretations per client address per hour (`scope=ip`) |
 | `INTERPRET_GLOBAL_LIMIT_PER_HOUR` | `100` | new interpretations for the whole server per hour (`scope=global`) |
+| `INTERPRET_CONCURRENCY` | `1` | interpretation queue workers (concurrent interpretation `claude -p` calls, separate from `LLM_MAX_CONCURRENCY`) |
+| `INTERPRET_QUEUE_MAX` | `20` | queued interpretations before `503 QUEUE_FULL` |
+| `AI_DAILY_BUDGET_USD` | `20` | server-wide AI spend per rolling 24 h (sum of `total_cost_usd` of every planner and interpreter call); over it → `429 AI_BUDGET_EXHAUSTED`, `details.scope=global` |
+| `AI_USER_DAILY_BUDGET_USD` | `3` | AI spend per account per rolling 24 h (`429 AI_BUDGET_EXHAUSTED`, `details.scope=user`) |
+| `REGISTRATION_INVITE_CODE` | (unset) | when set (and `REGISTRATION_OPEN=true`), `POST /api/v1/auth/register` needs `invite_code` equal to it: missing → `403 INVITE_REQUIRED`, wrong → `403 INVALID_INVITE` (counts toward `REGISTER_RATE_LIMIT_PER_IP_PER_HOUR`); `capabilities.registration_mode` is `open`, `invite` or `closed` |
+
+At startup the server also loads the v630 neuron id set from the completeness table named in
+`data/dataset_manifest.json` (SHA-256 and row count are checked); a missing or corrupt table stops
+the server, as the simulator cannot run without it.
 
 ---
 
@@ -317,15 +330,17 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/api/v1/jobs/{job
 # deterministic digest only (no LLM call); computes digest_graph.json for older runs on first use
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/api/v1/jobs/{job_id}/digest
 
-# generate (or return the cached) interpretation; regenerate=true replaces it
+# queue an interpretation (202 {state:"queued"|"running", request:{id, status, position, ...}}),
+# or get the stored one (200 {state:"ready", request:null, interpretation, ...}); regenerate=true replaces it
 curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
      -d '{"language":"ru"}' http://127.0.0.1:8080/api/v1/jobs/{job_id}/interpretation
 
-# latest stored interpretation (404 INTERPRETATION_NOT_FOUND when there is none)
+# poll: state queued|running|failed|ready, the request, and the result fields once one exists
+# (404 INTERPRETATION_NOT_FOUND when there is neither a request nor a result)
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/api/v1/jobs/{job_id}/interpretation
 ```
-A real interpretation takes about two minutes with `claude-opus-5-5`; keep reverse-proxy read timeouts
-above `CLAUDE_INTERPRET_TIMEOUT_SECONDS` + 120 s.
+A real interpretation takes about two minutes with `claude-opus-5-5`; it runs on the queue worker,
+so no HTTP request waits for it.
 
 ---
 

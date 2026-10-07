@@ -29,16 +29,15 @@ const (
 	DigestTimeout = 60 * time.Second
 	// DigestWait is how long a request waits for the single digest slot (then 503 DIGEST_BUSY).
 	DigestWait = 20 * time.Second
-	// ClaudeSlotWait is how long a request waits for a Claude slot (then 503 LLM_BUSY).
-	ClaudeSlotWait = 30 * time.Second
+	// WorkerDigestWait is how long the interpretation worker waits for the digest slot before
+	// failing the request with DIGEST_BUSY (it has no client waiting on an HTTP response).
+	WorkerDigestWait = 3 * time.Minute
 	// ProxyReadTimeout is nginx's proxy_read_timeout (deploy/nginx-flylab.aglabx.com.conf).
-	// The worst case of one POST .../interpretation must stay below it, or nginx answers an
-	// HTML 504 while the server is still working; WorstCase is tested against it.
+	// The worst case of one request must stay below it, or nginx answers an HTML 504 while the
+	// server is still working; WorstCase is tested against it.
 	ProxyReadTimeout = 300 * time.Second
 	// stderrTail is how much of a failing flysim's stderr reaches digest_error.
 	stderrTail = 800
-
-	userInFlightRetry = 5 * time.Second
 )
 
 // DigestError means the deterministic digest cannot be produced for a succeeded run (missing
@@ -55,10 +54,11 @@ func (e *DigestBusyError) Error() string {
 	return fmt.Sprintf("another run's digest is being computed and no digest slot became free within %s; try again shortly", e.Wait)
 }
 
-// WorstCase is the longest one POST .../interpretation can take with these settings: digest
-// slot wait + flysim digest + Claude slot wait + the Claude call.
+// WorstCase is the longest one interpretation-related request can take: GET .../digest waits
+// for the digest slot and runs flysim digest. Since v4 POST .../interpretation only enqueues
+// (the Claude call runs on the queue worker), so it no longer depends on the Claude timeout.
 func WorstCase(cfg *config.Config) time.Duration {
-	return DigestWait + DigestTimeout + ClaudeSlotWait + time.Duration(cfg.ClaudeInterpretTimeoutSeconds)*time.Second
+	return DigestWait + DigestTimeout
 }
 
 // LLMError is a failed Claude interpretation (HTTP 502 LLM_ERROR); nothing is cached.
@@ -66,9 +66,9 @@ type LLMError struct{ Reason string }
 
 func (e *LLMError) Error() string { return "claude interpretation failed: " + e.Reason }
 
-// RateLimitError means an interpretation budget is exhausted (HTTP 429 RATE_LIMITED).
+// RateLimitError means an hourly interpretation limit is reached (HTTP 429 RATE_LIMITED).
 type RateLimitError struct {
-	Scope      string // user | ip | global | user_in_flight
+	Scope      string // user | ip | global
 	Limit      int
 	RetryAfter time.Duration
 }
@@ -123,16 +123,37 @@ type Service struct {
 	schema      string
 	prompts     map[string]string
 
+	budget        *llm.Budget
 	userLimiter   *ratelimit.Window
 	ipLimiter     *ratelimit.Window
 	globalLimiter *ratelimit.Window
 	limitMu       sync.Mutex
-	inFlight      map[int64]bool
 
 	digestSem  chan struct{}
 	digestWait time.Duration
 	jobMu      sync.Mutex
 	jobLocks   map[string]*sync.Mutex
+
+	// Interpretation queue (contract v4 section 4): see queue.go.
+	enqueueMu sync.Mutex
+	reqIPMu   sync.Mutex
+	reqIP     map[int64]string
+	wake      chan struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	statusMu  sync.Mutex
+	// persistErr is sticky (a request whose final status could not be saved stays 'running'
+	// until a restart marks it WORKER_INTERRUPTED); claimErr clears on the next good claim.
+	persistErr error
+	claimErr   error
+
+	// PersistRetryDelays are the waits between attempts to save a request's final status;
+	// PollInterval is how often idle workers look at the queue; WorkerDigestWait is the
+	// worker's digest slot wait. Tests shorten them.
+	PersistRetryDelays []time.Duration
+	PollInterval       time.Duration
+	WorkerDigestWait   time.Duration
 }
 
 // NewService loads data/annotations_630.tsv (missing = annotations_ready false; malformed =
@@ -144,6 +165,8 @@ func NewService(cfg *config.Config, store *storage.Store, registry *contracts.Re
 		"INTERPRET_RATE_LIMIT_PER_HOUR":        cfg.InterpretRateLimitPerHour,
 		"INTERPRET_RATE_LIMIT_PER_IP_PER_HOUR": cfg.InterpretRateLimitPerIPPerHour,
 		"INTERPRET_GLOBAL_LIMIT_PER_HOUR":      cfg.InterpretGlobalLimitPerHour,
+		"INTERPRET_CONCURRENCY":                cfg.InterpretConcurrency,
+		"INTERPRET_QUEUE_MAX":                  cfg.InterpretQueueMax,
 	} {
 		if v < 1 {
 			return nil, fmt.Errorf("%s must be >= 1 (got %d)", name, v)
@@ -151,6 +174,9 @@ func NewService(cfg *config.Config, store *storage.Store, registry *contracts.Re
 	}
 	if strings.TrimSpace(cfg.ClaudeInterpretModel) == "" {
 		return nil, errors.New("CLAUDE_INTERPRET_MODEL is empty")
+	}
+	if llmClient == nil || llmClient.Budget() == nil {
+		return nil, errors.New("the interpretation service needs the claude client and its AI budget")
 	}
 	ann, err := LoadAnnotations(AnnotationsPath(cfg))
 	if err != nil {
@@ -171,13 +197,18 @@ func NewService(cfg *config.Config, store *storage.Store, registry *contracts.Re
 	return &Service{
 		cfg: cfg, store: store, registry: registry, validator: validator, llm: llmClient,
 		annotations: ann, proxies: proxies, schema: schema, prompts: prompts,
-		userLimiter:   ratelimit.New(cfg.InterpretRateLimitPerHour, time.Hour),
-		ipLimiter:     ratelimit.New(cfg.InterpretRateLimitPerIPPerHour, time.Hour),
-		globalLimiter: ratelimit.New(cfg.InterpretGlobalLimitPerHour, time.Hour),
-		inFlight:      map[int64]bool{},
-		digestSem:     make(chan struct{}, 1),
-		digestWait:    DigestWait,
-		jobLocks:      map[string]*sync.Mutex{},
+		budget:             llmClient.Budget(),
+		userLimiter:        ratelimit.New(cfg.InterpretRateLimitPerHour, time.Hour),
+		ipLimiter:          ratelimit.New(cfg.InterpretRateLimitPerIPPerHour, time.Hour),
+		globalLimiter:      ratelimit.New(cfg.InterpretGlobalLimitPerHour, time.Hour),
+		digestSem:          make(chan struct{}, 1),
+		digestWait:         DigestWait,
+		jobLocks:           map[string]*sync.Mutex{},
+		reqIP:              map[int64]string{},
+		wake:               make(chan struct{}, 1),
+		PersistRetryDelays: []time.Duration{200 * time.Millisecond, time.Second, 3 * time.Second},
+		PollInterval:       time.Second,
+		WorkerDigestWait:   WorkerDigestWait,
 	}, nil
 }
 
@@ -201,12 +232,14 @@ type limitCheck struct {
 	scope string
 }
 
+// limitChecks are the hourly windows of one request; clientIP "" (unknown after a restart)
+// skips the per-address window.
 func (s *Service) limitChecks(userID int64, clientIP string) []limitCheck {
-	return []limitCheck{
-		{s.userLimiter, strconv.FormatInt(userID, 10), llm.ScopeUser},
-		{s.ipLimiter, clientIP, llm.ScopeIP},
-		{s.globalLimiter, "global", llm.ScopeGlobal},
+	checks := []limitCheck{{s.userLimiter, strconv.FormatInt(userID, 10), llm.ScopeUser}}
+	if clientIP != "" {
+		checks = append(checks, limitCheck{s.ipLimiter, clientIP, llm.ScopeIP})
 	}
+	return append(checks, limitCheck{s.globalLimiter, "global", llm.ScopeGlobal})
 }
 
 func checkLimits(checks []limitCheck, now time.Time) error {
@@ -218,38 +251,27 @@ func checkLimits(checks []limitCheck, now time.Time) error {
 	return nil
 }
 
-// admit checks the hourly limits and takes the account's in-flight slot, without using any
-// quota. commit re-checks the limits and records one unit in each window; it is called only
-// once the digest is built and a Claude slot is held, so digest failures and LLM_BUSY are free.
-func (s *Service) admit(userID int64, clientIP string) (release func(), commit func() error, err error) {
+// checkHourlyLimits checks the hourly limits at enqueue time without using any quota.
+func (s *Service) checkHourlyLimits(userID int64, clientIP string) error {
 	s.limitMu.Lock()
 	defer s.limitMu.Unlock()
-	if s.inFlight[userID] {
-		return nil, nil, &RateLimitError{Scope: llm.ScopeUserInFlight, Limit: 1, RetryAfter: userInFlightRetry}
-	}
+	return checkLimits(s.limitChecks(userID, clientIP), time.Now())
+}
+
+// commitHourlyLimits re-checks and records one unit in each window. The worker calls it once
+// the digest is built, right before Claude starts, so digest failures cost no quota.
+func (s *Service) commitHourlyLimits(userID int64, clientIP string) error {
+	s.limitMu.Lock()
+	defer s.limitMu.Unlock()
+	now := time.Now()
 	checks := s.limitChecks(userID, clientIP)
-	if err := checkLimits(checks, time.Now()); err != nil {
-		return nil, nil, err
+	if err := checkLimits(checks, now); err != nil {
+		return err
 	}
-	s.inFlight[userID] = true
-	release = func() {
-		s.limitMu.Lock()
-		delete(s.inFlight, userID)
-		s.limitMu.Unlock()
+	for _, c := range checks {
+		c.w.Record(c.key, now)
 	}
-	commit = func() error {
-		s.limitMu.Lock()
-		defer s.limitMu.Unlock()
-		now := time.Now()
-		if err := checkLimits(checks, now); err != nil {
-			return err
-		}
-		for _, c := range checks {
-			c.w.Record(c.key, now)
-		}
-		return nil
-	}
-	return release, commit, nil
+	return nil
 }
 
 func (s *Service) lockJob(jobID string) func() {
@@ -307,7 +329,7 @@ func (s *Service) manifestWarnings(dir string) ([]string, error) {
 // ensureGraph makes sure digest_graph.json exists in the run's artifact directory, running
 // `flysim digest` on the stored spikes.parquet when it does not (pre-v3 runs, or the first
 // request). force deletes an existing file first (used when the cached file cannot be used).
-func (s *Service) ensureGraph(ctx context.Context, job *domain.Job, force bool) error {
+func (s *Service) ensureGraph(ctx context.Context, job *domain.Job, force bool, wait time.Duration) error {
 	dir := job.ArtifactsDir
 	out := filepath.Join(dir, "digest_graph.json")
 	if force {
@@ -333,12 +355,12 @@ func (s *Service) ensureGraph(ctx context.Context, job *domain.Job, force bool) 
 		return &DigestError{Reason: fmt.Sprintf("resolved_plan.json of this run cannot be accessed: %v", err)}
 	}
 
-	timer := time.NewTimer(s.digestWait)
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
 	case s.digestSem <- struct{}{}:
 	case <-timer.C:
-		return &DigestBusyError{Wait: s.digestWait}
+		return &DigestBusyError{Wait: wait}
 	case <-ctx.Done():
 		return &DigestError{Reason: fmt.Sprintf("request cancelled while waiting for a digest slot: %v", ctx.Err())}
 	}
@@ -382,13 +404,17 @@ func (s *Service) ensureGraph(ctx context.Context, job *domain.Job, force bool) 
 // spikes.parquet, and unless it was merely outdated the digest carries a warning saying so.
 // Errors are *DigestError or *DigestBusyError.
 func (s *Service) Digest(ctx context.Context, job *domain.Job, force bool) (*Digest, error) {
+	return s.digestWith(ctx, job, force, s.digestWait)
+}
+
+func (s *Service) digestWith(ctx context.Context, job *domain.Job, force bool, wait time.Duration) (*Digest, error) {
 	unlock := s.lockJob(job.JobID)
 	defer unlock()
 	warnings, err := s.manifestWarnings(job.ArtifactsDir)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.ensureGraph(ctx, job, force); err != nil {
+	if err := s.ensureGraph(ctx, job, force, wait); err != nil {
 		return nil, err
 	}
 	in := DigestInput{
@@ -398,7 +424,7 @@ func (s *Service) Digest(ctx context.Context, job *domain.Job, force bool) (*Dig
 	d, err := BuildDigest(in)
 	var ge *GraphError
 	if err != nil && errors.As(err, &ge) {
-		if rerr := s.ensureGraph(ctx, job, true); rerr != nil {
+		if rerr := s.ensureGraph(ctx, job, true, wait); rerr != nil {
 			if de, ok := rerr.(*DigestError); ok {
 				return nil, &DigestError{Reason: fmt.Sprintf("the cached digest_graph.json could not be used (%s) and recomputing it failed: %s", ge.Reason, de.Reason)}
 			}
@@ -416,21 +442,39 @@ func (s *Service) Digest(ctx context.Context, job *domain.Job, force bool) (*Dig
 	return d, nil
 }
 
-// Stored returns the stored interpretation (storage.ErrNotFound when there is none).
+// CorruptError means the stored interpretation exists but cannot be read (HTTP 500
+// INTERPRETATION_CORRUPT, or result_error next to an active/failed request).
+type CorruptError struct{ Reason string }
+
+func (e *CorruptError) Error() string { return e.Reason }
+
+// Stored returns the stored interpretation: storage.ErrNotFound when there is none,
+// *CorruptError when the row cannot be read or parsed.
 func (s *Service) Stored(jobID string) (*Response, error) {
+	resp, _, err := s.loadStored(jobID)
+	return resp, err
+}
+
+// loadStored also returns the row's created_at (nil when unknown), which decides whether a
+// failed request is newer than the result.
+func (s *Service) loadStored(jobID string) (*Response, *time.Time, error) {
 	rec, err := s.store.GetInterpretation(jobID)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, nil, err
+		}
+		return nil, nil, &CorruptError{Reason: fmt.Sprintf("stored interpretation of %s cannot be read: %v", jobID, err)}
 	}
+	created := rec.CreatedAt
 	var st stored
 	if err := json.Unmarshal([]byte(rec.ResultJSON), &st); err != nil || st.Interpretation == nil {
 		if err == nil {
 			err = errors.New("no interpretation object")
 		}
-		return nil, fmt.Errorf("stored interpretation of %s is corrupt: %v", jobID, err)
+		return nil, &created, &CorruptError{Reason: fmt.Sprintf("stored interpretation of %s is corrupt: %v", jobID, err)}
 	}
 	if !json.Valid([]byte(rec.DigestJSON)) {
-		return nil, fmt.Errorf("stored digest of %s is corrupt (invalid JSON)", jobID)
+		return nil, &created, &CorruptError{Reason: fmt.Sprintf("stored digest of %s is corrupt (invalid JSON)", jobID)}
 	}
 	if st.EvidenceWarnings == nil {
 		st.EvidenceWarnings = []EvidenceWarning{}
@@ -445,78 +489,7 @@ func (s *Service) Stored(jobID string) (*Response, error) {
 			CreatedAt: rec.CreatedAt, Language: rec.Language, Cached: true},
 		Disclaimer:       Disclaimers[rec.Language],
 		EvidenceWarnings: st.EvidenceWarnings,
-	}, nil
-}
-
-// Generate builds the digest, calls Claude, validates and stores the interpretation.
-// Errors: *RateLimitError, *DigestError, *LLMError, llm.ErrBusy, or a storage error.
-//
-// Once admitted, the work no longer depends on the client connection: ctx is detached from
-// cancellation (its values are kept), so a reload or a closed tab does not kill a paid Claude
-// call, and the stored result is found by the next GET. The timeouts still bound every step.
-// Quota is used only when a Claude slot is held (see admit).
-func (s *Service) Generate(ctx context.Context, job *domain.Job, userID int64, clientIP, lang string, regenerate bool) (*Response, error) {
-	release, commit, err := s.admit(userID, clientIP)
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-	ctx = context.WithoutCancel(ctx)
-
-	digest, err := s.Digest(ctx, job, false)
-	if err != nil {
-		return nil, err
-	}
-	digestJSON, err := json.Marshal(digest)
-	if err != nil {
-		return nil, &DigestError{Reason: fmt.Sprintf("digest cannot be encoded: %v", err)}
-	}
-
-	res, err := s.llm.RunStructured(ctx, llm.StructuredCall{
-		Model:        s.cfg.ClaudeInterpretModel,
-		SystemPrompt: s.prompts[lang],
-		Schema:       s.schema,
-		Stdin:        BuildUserMessage(job.Title, job.Prompt, lang, digestJSON),
-		Timeout:      time.Duration(s.cfg.ClaudeInterpretTimeoutSeconds) * time.Second,
-		OnSlot:       commit,
-	})
-	if err != nil {
-		var le *llm.Error
-		if errors.As(err, &le) {
-			return nil, &LLMError{Reason: le.Reason}
-		}
-		return nil, err
-	}
-	out, err := decodeOutput(res.Output)
-	if err != nil {
-		return nil, &LLMError{Reason: fmt.Sprintf("malformed structured_output: %v: %s", err, excerpt(string(res.Output)))}
-	}
-	if err := validateTests(out, s.validator, s.store, lang); err != nil {
-		return nil, err
-	}
-	qualityWarnings(out, digestJSON, lang)
-	warnings := evidenceWarnings(out, digestJSON, digest.References)
-
-	resultJSON, err := json.Marshal(stored{Interpretation: out, EvidenceWarnings: warnings})
-	if err != nil {
-		return nil, fmt.Errorf("interpretation cannot be encoded: %w", err)
-	}
-	now := time.Now().UTC()
-	rec := &storage.Interpretation{
-		JobID: job.JobID, Language: lang, Model: s.cfg.ClaudeInterpretModel, CreatedAt: now,
-		CostUSD: res.CostUSD, DurationMS: res.DurationMS, DigestJSON: string(digestJSON), ResultJSON: string(resultJSON),
-	}
-	if err := s.store.SaveInterpretation(rec); err != nil {
-		return nil, err
-	}
-	return &Response{
-		Interpretation: out,
-		Digest:         json.RawMessage(digestJSON),
-		Meta: Meta{Model: rec.Model, CostUSD: rec.CostUSD, DurationMS: rec.DurationMS,
-			CreatedAt: now, Language: lang, Cached: false},
-		Disclaimer:       Disclaimers[lang],
-		EvidenceWarnings: warnings,
-	}, nil
+	}, &created, nil
 }
 
 func excerpt(s string) string {

@@ -137,6 +137,9 @@ type HistoryJob struct {
 	// InterpretationLanguage is the stored interpretation's language (null without one), so
 	// the UI labels a run in the language its hypotheses are written in.
 	InterpretationLanguage *string `json:"interpretation_language"`
+	// InterpretationState (contract v4): queued | running | failed | ready, null when the job
+	// has neither an interpretation request nor a stored interpretation.
+	InterpretationState *string `json:"interpretation_state"`
 }
 
 type NeuronGroup struct {

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -34,15 +35,26 @@ type Config struct {
 	ParseGlobalLimitPerHour    int
 
 	// Interpretation (v3: spikes -> AI hypotheses) through the same claude CLI. The rate limits
-	// are separate counters from the planner's; the concurrency slots are shared.
+	// are separate counters from the planner's. v4: interpretations run on their own queue
+	// worker (InterpretConcurrency calls at a time), not on the planner's slots.
 	ClaudeInterpretModel           string
 	ClaudeInterpretTimeoutSeconds  int
 	InterpretRateLimitPerHour      int
 	InterpretRateLimitPerIPPerHour int
 	InterpretGlobalLimitPerHour    int
+	InterpretConcurrency           int
+	InterpretQueueMax              int
+
+	// AI budget (v4): rolling 24 h spend of every claude -p call, from the CLI's
+	// total_cost_usd, for the whole server and per account.
+	AIDailyBudgetUSD     float64
+	AIUserDailyBudgetUSD float64
 
 	// Accounts.
 	RegistrationOpen bool
+	// RegistrationInviteCode, when set (and RegistrationOpen), is required as invite_code to
+	// register ("invite" registration mode).
+	RegistrationInviteCode string
 	// AuthRateLimitPerIP: login + register attempts per client address per 15 minutes.
 	AuthRateLimitPerIP int
 	// LoginFailuresPerUsername: failed logins per username per 15 minutes before that
@@ -90,6 +102,31 @@ func LoadConfig() (*Config, error) {
 		return v
 	}
 
+	// floatVar is a positive, finite amount (budgets in USD).
+	floatVar := func(key string, def float64) float64 {
+		raw := strings.TrimSpace(os.Getenv(key))
+		if raw == "" {
+			return def
+		}
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+			errs = append(errs, fmt.Sprintf("%s=%q is not a number", key, raw))
+			return def
+		}
+		if v <= 0 {
+			errs = append(errs, fmt.Sprintf("%s=%s must be > 0", key, raw))
+			return def
+		}
+		return v
+	}
+
+	// An invite code that is set but blank would silently open registration: refuse it.
+	invite := os.Getenv("REGISTRATION_INVITE_CODE")
+	if invite != "" && strings.TrimSpace(invite) == "" {
+		errs = append(errs, "REGISTRATION_INVITE_CODE is set but blank")
+	}
+	invite = strings.TrimSpace(invite)
+
 	cfg := &Config{
 		Host:             getEnv("HOST", "0.0.0.0"),
 		Port:             intVar("PORT", 8080, 1),
@@ -119,8 +156,14 @@ func LoadConfig() (*Config, error) {
 		InterpretRateLimitPerHour:      intVar("INTERPRET_RATE_LIMIT_PER_HOUR", 20, 1),
 		InterpretRateLimitPerIPPerHour: intVar("INTERPRET_RATE_LIMIT_PER_IP_PER_HOUR", 40, 1),
 		InterpretGlobalLimitPerHour:    intVar("INTERPRET_GLOBAL_LIMIT_PER_HOUR", 100, 1),
+		InterpretConcurrency:           intVar("INTERPRET_CONCURRENCY", 1, 1),
+		InterpretQueueMax:              intVar("INTERPRET_QUEUE_MAX", 20, 1),
+
+		AIDailyBudgetUSD:     floatVar("AI_DAILY_BUDGET_USD", 20),
+		AIUserDailyBudgetUSD: floatVar("AI_USER_DAILY_BUDGET_USD", 3),
 
 		RegistrationOpen:              boolVar("REGISTRATION_OPEN", true),
+		RegistrationInviteCode:        invite,
 		AuthRateLimitPerIP:            intVar("AUTH_RATE_LIMIT_PER_IP", 30, 1),
 		LoginFailuresPerUsername:      intVar("LOGIN_FAILURES_PER_USERNAME", 10, 1),
 		RegisterRateLimitPerIPPerHour: intVar("REGISTER_RATE_LIMIT_PER_IP_PER_HOUR", 5, 1),
@@ -131,6 +174,26 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("invalid configuration: %s", strings.Join(errs, "; "))
 	}
 	return cfg, nil
+}
+
+// Registration modes reported by GET /capabilities (contract v4 section 3).
+const (
+	RegistrationModeOpen   = "open"
+	RegistrationModeInvite = "invite"
+	RegistrationModeClosed = "closed"
+)
+
+// RegistrationMode is "closed" when REGISTRATION_OPEN=false, "invite" when an invite code is
+// configured, else "open".
+func (c *Config) RegistrationMode() string {
+	switch {
+	case !c.RegistrationOpen:
+		return RegistrationModeClosed
+	case c.RegistrationInviteCode != "":
+		return RegistrationModeInvite
+	default:
+		return RegistrationModeOpen
+	}
 }
 
 func getEnv(key, defaultVal string) string {

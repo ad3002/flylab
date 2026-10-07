@@ -179,19 +179,33 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, status int, 
 	s.writeJSON(w, status, errResp)
 }
 
+// interpretWorkerError is the interpretation queue worker's degraded state (nil when healthy).
+func (s *Server) interpretWorkerError() *string {
+	if s.interp == nil {
+		return nil
+	}
+	if err := s.interp.LastError(); err != nil {
+		msg := err.Error()
+		return &msg
+	}
+	return nil
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	status, code := "ok", http.StatusOK
 	werr := s.workerError()
-	if werr != nil {
+	ierr := s.interpretWorkerError()
+	if werr != nil || ierr != nil {
 		status, code = "degraded", http.StatusServiceUnavailable
 	}
 	s.writeJSON(w, code, map[string]interface{}{
-		"status":       status,
-		"service":      "flylab",
-		"domain":       s.cfg.Domain,
-		"version":      "1.0.0",
-		"time":         time.Now().UTC().Format(time.RFC3339),
-		"worker_error": werr,
+		"status":                 status,
+		"service":                "flylab",
+		"domain":                 s.cfg.Domain,
+		"version":                "1.0.0",
+		"time":                   time.Now().UTC().Format(time.RFC3339),
+		"worker_error":           werr,
+		"interpret_worker_error": ierr,
 	})
 }
 
@@ -200,21 +214,44 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	_, flysimErr := os.Stat(s.cfg.FlysimBin)
 
 	annReady, annCount, interpModel := false, 0, s.cfg.ClaudeInterpretModel
+	var queue interface{}
+	var queueErr *string
 	if s.interp != nil {
 		annReady, annCount = s.interp.Annotations().Ready, s.interp.Annotations().Count()
+		if queued, running, err := s.interp.QueueCounts(); err != nil {
+			msg := err.Error()
+			queueErr = &msg
+		} else {
+			queue = map[string]int{"queued": queued, "running": running}
+		}
+	}
+	// The global AI budget: unreadable spend is reported, never shown as available.
+	budgetAvailable := false
+	var budgetErr *string
+	if u, err := s.llmClient.Budget().GlobalUsage(); err != nil {
+		msg := fmt.Sprintf("the AI budget cannot be checked: %v", err)
+		budgetErr = &msg
+	} else {
+		budgetAvailable = !u.Exhausted
 	}
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"annotations_ready": annReady,
-		"annotations_count": annCount,
-		"interpret_model":   interpModel,
-		"interpret_ready":   s.interp != nil && s.llmClient.Ready(),
-		"datasets_ready":    dataErr == nil,
-		"worker_ready":      flysimErr == nil && s.workerError() == nil,
-		"worker_error":      s.workerError(),
-		"llm_provider":      "claude-cli",
-		"llm_model":         s.cfg.ClaudeModel,
-		"llm_ready":         s.llmClient.Ready(),
-		"registration_open": s.cfg.RegistrationOpen,
+		"ai_budget_available":    budgetAvailable,
+		"ai_budget_error":        budgetErr,
+		"registration_mode":      s.cfg.RegistrationMode(),
+		"interpret_queue":        queue,
+		"interpret_queue_error":  queueErr,
+		"interpret_worker_error": s.interpretWorkerError(),
+		"annotations_ready":      annReady,
+		"annotations_count":      annCount,
+		"interpret_model":        interpModel,
+		"interpret_ready":        s.interp != nil && s.llmClient.Ready(),
+		"datasets_ready":         dataErr == nil,
+		"worker_ready":           flysimErr == nil && s.workerError() == nil,
+		"worker_error":           s.workerError(),
+		"llm_provider":           "claude-cli",
+		"llm_model":              s.cfg.ClaudeModel,
+		"llm_ready":              s.llmClient.Ready(),
+		"registration_open":      s.cfg.RegistrationOpen,
 		"limits": map[string]interface{}{
 			"max_wall_seconds":   s.cfg.MaxWallSeconds,
 			"max_rss_bytes":      s.cfg.MaxRSSBytes,
@@ -310,7 +347,11 @@ func (s *Server) handlePlanParse(w http.ResponseWriter, r *http.Request, user *d
 	if err != nil {
 		var rl *llm.RateLimitError
 		var le *llm.Error
+		var ue *llm.UsageRecordError
 		switch {
+		case s.writeBudgetError(w, r, err):
+		case errors.As(err, &ue):
+			s.writeError(w, r, http.StatusInternalServerError, "AI_USAGE_RECORD_FAILED", ue.Error(), nil)
 		case errors.As(err, &rl):
 			retry := ratelimit.RetrySeconds(rl.RetryAfter)
 			w.Header().Set("Retry-After", strconv.Itoa(retry))
@@ -351,6 +392,15 @@ func (s *Server) handlePlanValidate(w http.ResponseWriter, r *http.Request) {
 
 	valRes, err := s.validator.ValidateRawJSON(raw)
 	if err != nil {
+		var unk *contracts.UnknownNeuronsError
+		if errors.As(err, &unk) {
+			s.writeError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", err.Error(), map[string]interface{}{
+				"unknown_neuron_ids":       unk.ReportedIDs(),
+				"unknown_neuron_ids_total": len(unk.IDs),
+				"fields":                   unk.Paths(),
+			})
+			return
+		}
 		s.writeError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", err.Error(), nil)
 		return
 	}

@@ -48,6 +48,17 @@ case "${FAKE_CLAUDE_MODE:-ready_single}" in
   invalid_plan)
     ok_envelope '{"status":"ready","message":"Run 5 seconds.","unresolved_fields":[],"plan":{"experiment_type":"single","activation":[{"group_id":"sugar_grn","rate_hz":50}],"silencing":[],"readout":[{"group_id":"mn9"}],"duration_ms":5000,"repeats":1,"base_seed":42}}'
     ;;
+  long_message)
+    # 501 characters: one over the v4 cap of the planner message.
+    ok_envelope "{\"status\":\"needs_input\",\"message\":\"$(printf 'x%.0s' $(seq 1 501))\",\"unresolved_fields\":[]}"
+    ;;
+  too_many_fields)
+    ok_envelope '{"status":"needs_input","message":"Which?","unresolved_fields":["a","b","c","d","e","f","g","h","i","j","k"]}'
+    ;;
+  unknown_ids)
+    # Root ids the user typed that are not in the v630 connectome (plus one real one).
+    ok_envelope '{"status":"ready","message":"Stimulate the given neurons at 50 Hz.","unresolved_fields":[],"plan":{"experiment_type":"single","activation":[{"neuron_ids":["720575940000000001","720575940620900446","720575940999999999"],"rate_hz":50}],"silencing":[],"readout":[{"group_id":"mn9"}],"duration_ms":100,"repeats":1,"base_seed":42}}'
+    ;;
   from_file)
     # Interpretation tests: structured_output is the JSON in FAKE_CLAUDE_OUTPUT_FILE.
     ok_envelope "$(cat "$FAKE_CLAUDE_OUTPUT_FILE")"

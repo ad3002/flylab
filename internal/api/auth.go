@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ad3002/flylab/internal/auth"
+	"github.com/ad3002/flylab/internal/config"
 	"github.com/ad3002/flylab/internal/domain"
 	"github.com/ad3002/flylab/internal/storage"
 )
@@ -103,13 +106,31 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Username    string `json:"username"`
-		Password    string `json:"password"`
-		DisplayName string `json:"display_name"`
+		Username    string  `json:"username"`
+		Password    string  `json:"password"`
+		DisplayName string  `json:"display_name"`
+		InviteCode  *string `json:"invite_code"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		s.writeError(w, r, http.StatusUnprocessableEntity, "INVALID_REQUEST_BODY", err.Error(), nil)
 		return
+	}
+	// Invite mode (contract v4 section 3): the code is compared in constant time, and a wrong
+	// code counts toward the per-address registration limit, so guessing is bounded.
+	if s.cfg.RegistrationMode() == config.RegistrationModeInvite {
+		if body.InviteCode == nil || strings.TrimSpace(*body.InviteCode) == "" {
+			s.writeError(w, r, http.StatusForbidden, "INVITE_REQUIRED",
+				"Registration on this server needs an invite code", nil)
+			return
+		}
+		if !inviteMatches(strings.TrimSpace(*body.InviteCode), s.cfg.RegistrationInviteCode) {
+			if ok, retry := s.auth.registerIP.Allow(ip, time.Now()); !ok {
+				s.writeRateLimited(w, r, scopeRegisterIP, s.auth.registerIP, retry, "too many registration attempts from this network address")
+				return
+			}
+			s.writeError(w, r, http.StatusForbidden, "INVALID_INVITE", "The invite code is not valid", nil)
+			return
+		}
 	}
 	username, err := auth.NormalizeUsername(body.Username)
 	if err != nil {
@@ -157,6 +178,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusCreated, map[string]interface{}{"user": user, "token": token})
+}
+
+// inviteMatches compares the SHA-256 of both codes in constant time (no length leak).
+func inviteMatches(given, want string) bool {
+	g, w := sha256.Sum256([]byte(given)), sha256.Sum256([]byte(want))
+	return subtle.ConstantTimeCompare(g[:], w[:]) == 1
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -239,11 +266,30 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
 }
 
+// aiUsageView is GET /api/v1/me ai_usage (contract v4 section 3).
+type aiUsageView struct {
+	SpentUSD  float64    `json:"spent_24h_usd"`
+	BudgetUSD float64    `json:"budget_24h_usd"`
+	ResetsAt  *time.Time `json:"resets_at"`
+	Exhausted bool       `json:"exhausted"`
+}
+
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, user *domain.User) {
 	stats, err := s.store.UserStats(user.ID)
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "STATS_ERROR", err.Error(), nil)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]interface{}{"user": user, "stats": stats})
+	// An unreadable spend is shown as ai_usage_error, never as zero usage.
+	var usage *aiUsageView
+	var usageErr *string
+	if u, err := s.llmClient.Budget().UserUsage(user.ID); err != nil {
+		msg := fmt.Sprintf("today's AI usage cannot be read: %v", err)
+		usageErr = &msg
+	} else {
+		usage = &aiUsageView{SpentUSD: u.SpentUSD, BudgetUSD: u.BudgetUSD, ResetsAt: u.ResetsAt, Exhausted: u.Exhausted}
+	}
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"user": user, "stats": stats, "ai_usage": usage, "ai_usage_error": usageErr,
+	})
 }

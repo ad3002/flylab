@@ -13,25 +13,31 @@ import (
 	"github.com/ad3002/flylab/internal/storage"
 )
 
-// buildHistoryJobs builds the HistoryJob of every job, with has_interpretation from one
-// query. A failing query is an error (the caller answers 500), never has_interpretation=false.
+// buildHistoryJobs builds the HistoryJob of every job, with has_interpretation,
+// interpretation_language and interpretation_state from two queries. A failing query is an
+// error (the caller answers 500), never has_interpretation=false.
 func (s *Server) buildHistoryJobs(jobs []*domain.Job) ([]*domain.HistoryJob, error) {
 	ids := make([]string, len(jobs))
 	for i, j := range jobs {
 		ids[i] = j.JobID
 	}
-	interpreted, err := s.store.InterpretedJobs(ids)
+	infos, err := s.store.InterpretationInfos(ids)
 	if err != nil {
 		return nil, fmt.Errorf("cannot check which jobs have interpretations: %w", err)
 	}
 	out := make([]*domain.HistoryJob, 0, len(jobs))
 	for _, j := range jobs {
 		h := s.buildHistoryJob(j)
-		if lang, ok := interpreted[j.JobID]; ok {
-			h.HasInterpretation = true
-			if lang != "" {
-				l := lang
-				h.InterpretationLanguage = &l
+		if info, ok := infos[j.JobID]; ok {
+			if info.HasResult {
+				h.HasInterpretation = true
+				if info.Language != "" {
+					l := info.Language
+					h.InterpretationLanguage = &l
+				}
+			}
+			if st := storage.InterpretationState(info.Latest, info.HasResult, info.ResultAt); st != "" {
+				h.InterpretationState = &st
 			}
 		}
 		out = append(out, h)

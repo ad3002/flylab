@@ -85,6 +85,15 @@ func serve() {
 	}
 	log.Printf("Loaded experiment schema validator")
 
+	// v4: explicit neuron_ids must be neurons of the connectome. The completeness table is
+	// required (the simulator cannot run without it either), so a missing file is fatal.
+	neurons, err := contracts.LoadNeuronIDs(cfg.DataDir)
+	if err != nil {
+		log.Fatalf("Failed to load the connectome neuron ids: %v", err)
+	}
+	validator.SetNeuronIDs(neurons)
+	log.Printf("Neuron id check: %d neurons from %s", neurons.Len(), neurons.Path)
+
 	// Open SQLite Store
 	store, err := storage.OpenStore(cfg.DBPath)
 	if err != nil {
@@ -93,8 +102,16 @@ func serve() {
 	defer store.Close()
 	log.Printf("SQLite database opened successfully")
 
+	// AI budget (v4): every claude -p call is recorded in llm_usage and checked against the
+	// rolling 24 h global and per-account budgets.
+	budget, err := llm.NewBudget(store, cfg.AIDailyBudgetUSD, cfg.AIUserDailyBudgetUSD)
+	if err != nil {
+		log.Fatalf("Failed to initialise the AI budget: %v", err)
+	}
+	log.Printf("AI budget: $%.2f per 24 h for the server, $%.2f per account", cfg.AIDailyBudgetUSD, cfg.AIUserDailyBudgetUSD)
+
 	// Initialize the Claude planner client
-	llmClient, err := llm.NewClient(cfg, validator, registry)
+	llmClient, err := llm.NewClient(cfg, validator, registry, budget)
 	if err != nil {
 		log.Fatalf("Failed to initialise planner: %v", err)
 	}
@@ -115,6 +132,15 @@ func serve() {
 		log.Printf("WARNING: %s not found; capabilities report annotations_ready=false and every digest carries a coverage warning (run scripts/setup_data.sh)", ann.Path)
 	}
 
+	// v4 interpretation queue: requests left running by the previous process are marked
+	// failed (WORKER_INTERRUPTED); a failure to do so is fatal like a failed migration.
+	if err := interpreter.Start(); err != nil {
+		log.Fatalf("Failed to start the interpretation queue worker: %v", err)
+	}
+	defer interpreter.Stop()
+	log.Printf("Interpretation queue: %d worker(s), at most %d queued; registration mode %s",
+		cfg.InterpretConcurrency, cfg.InterpretQueueMax, cfg.RegistrationMode())
+
 	// Initialize and start background worker
 	w := worker.NewWorker(cfg, store)
 	if err := w.Start(); err != nil {
@@ -133,8 +159,8 @@ func serve() {
 		Addr:        fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Handler:     srv.Router(),
 		ReadTimeout: 30 * time.Second,
-		// An interpretation may wait for the digest slot, run flysim digest, wait for a Claude
-		// slot and run Claude (interpret.WorstCase): keep the write deadline above that.
+		// GET .../digest may wait for the digest slot and run flysim digest
+		// (interpret.WorstCase); interpretations themselves run on the queue worker.
 		WriteTimeout: interpret.WorstCase(cfg) + 60*time.Second,
 		IdleTimeout:  60 * time.Second,
 	}

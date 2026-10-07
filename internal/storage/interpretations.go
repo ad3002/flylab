@@ -21,16 +21,17 @@ type Interpretation struct {
 	ResultJSON string
 }
 
+const upsertInterpretationSQL = `INSERT INTO interpretations (job_id, language, model, created_at, cost_usd, duration_ms, digest_json, result_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(job_id) DO UPDATE SET language = excluded.language, model = excluded.model,
+		   created_at = excluded.created_at, cost_usd = excluded.cost_usd, duration_ms = excluded.duration_ms,
+		   digest_json = excluded.digest_json, result_json = excluded.result_json`
+
 // SaveInterpretation stores the interpretation of a job, replacing the previous one.
 func (s *Store) SaveInterpretation(in *Interpretation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(
-		`INSERT INTO interpretations (job_id, language, model, created_at, cost_usd, duration_ms, digest_json, result_json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(job_id) DO UPDATE SET language = excluded.language, model = excluded.model,
-		   created_at = excluded.created_at, cost_usd = excluded.cost_usd, duration_ms = excluded.duration_ms,
-		   digest_json = excluded.digest_json, result_json = excluded.result_json`,
+	_, err := s.db.Exec(upsertInterpretationSQL,
 		in.JobID, in.Language, in.Model, in.CreatedAt, in.CostUSD, in.DurationMS, in.DigestJSON, in.ResultJSON,
 	)
 	if err != nil {

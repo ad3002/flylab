@@ -86,6 +86,10 @@
 .field-label { font-size: 0.82rem; font-weight: 600; color: var(--text-2); }
 .field-label em { font-style: normal; color: var(--faint); font-weight: 500; margin-left: 4px; }
 .field-hint { font-size: 0.76rem; color: var(--faint); }
+/* a field's own problem, said on the field (invite code) */
+.field-error { display: flex; flex-direction: column; gap: 2px; font-size: 0.8rem; font-weight: 600; color: var(--red); overflow-wrap: anywhere; }
+.field-error-meta { font-size: 0.58rem; font-weight: 500; color: var(--muted); }
+.field input[aria-invalid="true"] { border-color: rgba(255, 93, 108, 0.7); }
 .field input, .field select, .title-input, .seed-row input, .rate-row input[type="number"] {
   width: 100%;
   min-height: 46px;
@@ -314,6 +318,8 @@ details.json pre { margin: 0; padding: 0 16px 16px; max-height: 420px; overflow:
 .spinner::before { left: 0; background: var(--green); }
 .spinner::after { left: 6px; background: var(--magenta); animation-delay: 0.22s; }
 @keyframes tick { 0%, 100% { transform: scaleY(0.3); opacity: 0.5; } 45% { transform: none; opacity: 1; } }
+/* waiting in a queue: the same bars, idling */
+.spinner-slow::before, .spinner-slow::after { animation-duration: 2.4s; }
 .run-slot:not(:empty) { margin-top: 6px; }
 .b-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .banner .b-actions .btn { color: var(--text); }
@@ -548,6 +554,34 @@ canvas.raster { width: 100%; height: 160px; border-radius: var(--r-s); cursor: c
 .avatar-lg { width: 88px; height: 88px; font-size: 2.6rem; flex: none; }
 .acct-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 
+/* AI usage: a single meter. The text says amount, state and reset; the bar repeats it. */
+.usage {
+  display: flex; flex-direction: column; gap: 12px;
+  padding: clamp(16px, 2.6vw, 24px); border-radius: var(--r-m);
+  background: var(--plate-2); border: 1px solid var(--line);
+}
+.usage-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 8px 18px; flex-wrap: wrap; }
+.usage-eyebrow { margin: 0 0 8px; color: var(--cyan); display: inline-flex; align-items: center; gap: 8px; }
+.usage-num { margin: 0; display: inline-flex; align-items: baseline; gap: 8px; font-family: var(--f-display); font-variation-settings: "wdth" 75; font-weight: 600; line-height: 1; }
+.usage-spent { font-size: clamp(1.7rem, 3vw, 2.3rem); letter-spacing: -0.01em; color: var(--text); }
+.usage-of { font-size: 1.05rem; color: var(--muted); }
+.meter { position: relative; height: 8px; border-radius: 4px; background: var(--plate-3); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; }
+.meter-fill {
+  position: absolute; inset: 0; border-radius: 4px; background: var(--green);
+  clip-path: inset(0 calc((1 - var(--f, 0)) * 100%) 0 0 round 4px);
+}
+.mo .meter-fill { animation: meterIn var(--dur-5) var(--ease-out) 0.2s backwards; }
+@keyframes meterIn { from { clip-path: inset(0 100% 0 0 round 4px); } }
+.usage-high .meter-fill { background: var(--amber); }
+.usage-out .meter-fill { background: var(--red); }
+.usage-foot { display: flex; justify-content: space-between; align-items: baseline; gap: 6px 18px; flex-wrap: wrap; }
+.usage-state { display: inline-flex; align-items: center; gap: 8px; font-size: 0.66rem; color: var(--text-2); }
+.usage-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex: none; }
+.usage-high .usage-dot { background: var(--amber); }
+.usage-out .usage-dot { background: var(--red); }
+.usage-reset { color: var(--text-2); font-size: 0.86rem; }
+.usage-note { margin: 0; }
+
 /* ---------- responsive ---------- */
 @media (max-width: 960px) {
   .results-grid { grid-template-columns: minmax(0, 1fr); }
@@ -658,6 +692,9 @@ canvas.raster { width: 100%; height: 160px; border-radius: var(--r-s); cursor: c
 .ai-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .ai-gen { min-height: 48px; }
 .ai-model { font-size: 0.62rem; opacity: 0.6; font-weight: 500; }
+.ai-queue-hint { margin: 0; color: var(--muted); font-size: 0.62rem; }
+.ai-q-chip { margin-bottom: 8px; }
+.ai-poll:empty { display: none; }
 
 /* loading: the planner's drafting plate, in the AI channel */
 .ai-loading {
@@ -879,24 +916,12 @@ h5.ai-d-h { color: var(--muted); }
 .card-ai-wait { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; flex-basis: 100%; }
 .card-ai-wait .card-ai-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
 .card-ai-note { margin: 0; color: var(--muted); font-size: 0.74rem; line-height: 1.45; overflow-wrap: anywhere; }
+.card-ai-err.warn b { color: var(--amber); }
+.card-ai-err.info b { color: var(--cyan); }
+.card-ai-inline-link { color: var(--cyan); font-weight: 600; text-underline-offset: 3px; }
+.card-ai-inline-link:hover { color: var(--text); }
+.card-ai-busy { flex-wrap: wrap; }
 
-/* A failed interpretation, announced wherever the user is; stays until dismissed. */
-.ai-notices {
-  position: fixed; right: 16px; bottom: 16px; z-index: 95;
-  display: flex; flex-direction: column; gap: 10px;
-  width: min(380px, calc(100vw - 32px));
-}
-.ai-notice {
-  padding: 14px 16px; border-radius: var(--r-m);
-  background: rgba(18, 21, 24, 0.97); border: 1px solid rgba(255, 93, 108, 0.55);
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
-  font-size: 0.84rem; color: var(--text-2); overflow-wrap: anywhere;
-}
-.ai-notice p { margin: 0 0 6px; }
-.ai-notice-title { color: var(--text); font-weight: 650; }
-.ai-notice-body b { color: var(--red); font-weight: 650; }
-.ai-notice-meta { color: var(--muted); font-size: 0.6rem; }
-.ai-notice-actions { display: flex; gap: 8px; margin-top: 8px; }
 .ai-mark {
   font-family: var(--f-mono); font-size: 0.6rem; letter-spacing: 0.06em; font-weight: 600;
   padding: 3px 8px; border-radius: 999px;

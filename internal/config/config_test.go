@@ -107,3 +107,50 @@ func TestLoadConfigInterpretation(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadConfigV4GuardrailSettings(t *testing.T) {
+	for _, k := range []string{"AI_DAILY_BUDGET_USD", "AI_USER_DAILY_BUDGET_USD", "INTERPRET_CONCURRENCY",
+		"INTERPRET_QUEUE_MAX", "REGISTRATION_INVITE_CODE", "REGISTRATION_OPEN"} {
+		t.Setenv(k, "")
+	}
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AIDailyBudgetUSD != 20 || cfg.AIUserDailyBudgetUSD != 3 || cfg.InterpretConcurrency != 1 ||
+		cfg.InterpretQueueMax != 20 || cfg.RegistrationInviteCode != "" || cfg.RegistrationMode() != "open" {
+		t.Fatalf("unexpected v4 defaults: global=%v user=%v conc=%d queue=%d invite=%q mode=%s", cfg.AIDailyBudgetUSD,
+			cfg.AIUserDailyBudgetUSD, cfg.InterpretConcurrency, cfg.InterpretQueueMax, cfg.RegistrationInviteCode, cfg.RegistrationMode())
+	}
+
+	t.Setenv("AI_USER_DAILY_BUDGET_USD", "0.01")
+	t.Setenv("REGISTRATION_INVITE_CODE", " fly-2026 ")
+	cfg, err = config.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AIUserDailyBudgetUSD != 0.01 || cfg.RegistrationInviteCode != "fly-2026" || cfg.RegistrationMode() != "invite" {
+		t.Fatalf("budget/invite not applied: %v %q %s", cfg.AIUserDailyBudgetUSD, cfg.RegistrationInviteCode, cfg.RegistrationMode())
+	}
+	t.Setenv("REGISTRATION_OPEN", "false")
+	if cfg, err = config.LoadConfig(); err != nil || cfg.RegistrationMode() != "closed" {
+		t.Fatalf("REGISTRATION_OPEN=false must win over the invite code: %v %v", cfg, err)
+	}
+
+	t.Setenv("REGISTRATION_OPEN", "")
+	t.Setenv("AI_DAILY_BUDGET_USD", "lots")
+	t.Setenv("AI_USER_DAILY_BUDGET_USD", "0")
+	t.Setenv("INTERPRET_QUEUE_MAX", "0")
+	t.Setenv("INTERPRET_CONCURRENCY", "NaN")
+	t.Setenv("REGISTRATION_INVITE_CODE", "   ")
+	_, err = config.LoadConfig()
+	if err == nil {
+		t.Fatalf("malformed v4 settings must be a startup error")
+	}
+	for _, want := range []string{`AI_DAILY_BUDGET_USD="lots" is not a number`, "AI_USER_DAILY_BUDGET_USD=0 must be > 0",
+		"INTERPRET_QUEUE_MAX=0 must be >= 1", `INTERPRET_CONCURRENCY="NaN" is not an integer`, "REGISTRATION_INVITE_CODE is set but blank"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err.Error(), want)
+		}
+	}
+}

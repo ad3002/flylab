@@ -82,7 +82,18 @@ if [[ "$ME_USER" != "$SMOKE_USER" ]]; then
     echo "Error: /api/v1/me returned user '$ME_USER', expected '$SMOKE_USER'" >&2
     exit 1
 fi
-echo "Registered $SMOKE_USER; Bearer auth works, anonymous access and text/plain POSTs are rejected."
+# v4: the account page's AI usage and the capabilities the UI needs.
+ME_USAGE=$(json_get "$(curl -s "${AUTH[@]}" "$BASE/api/v1/me")" '[d["ai_usage"]["spent_24h_usd"], d["ai_usage"]["budget_24h_usd"] > 0, d["ai_usage_error"]]')
+if [[ "$ME_USAGE" != '[0, true, null]' ]]; then
+    echo "Error: /api/v1/me ai_usage of a fresh account must be [0, true, null], got $ME_USAGE" >&2
+    exit 1
+fi
+CAPS_V4=$(json_get "$(curl -s "$BASE/capabilities")" '[d["registration_mode"], d["ai_budget_available"], d["interpret_queue"]["queued"], d["interpret_queue_error"], d["interpret_worker_error"]]')
+if [[ "$CAPS_V4" != '["open", true, 0, null, null]' ]]; then
+    echo "Error: capabilities v4 fields wrong [registration_mode, ai_budget_available, queued, queue_error, worker_error]: $CAPS_V4" >&2
+    exit 1
+fi
+echo "Registered $SMOKE_USER; Bearer auth works, anonymous access and text/plain POSTs are rejected; AI usage and queue are reported."
 
 echo "[3/8] Validating experiment plan (Sugar GRN 50 Hz vs Demo Silencing)..."
 PLAN_FILE="$ROOT_DIR/contracts/fixtures/valid_compare.json"
@@ -96,6 +107,16 @@ if [[ -z "$PLAN_ID" ]]; then
     exit 1
 fi
 echo "Plan validated successfully: $PLAN_ID"
+# v4: an explicit neuron id that is not in the v630 connectome is a 422 naming it.
+UNKNOWN_BODY="$TEMP_DIR/unknown_ids.json"
+UNKNOWN_CODE=$(curl -s -o "$UNKNOWN_BODY" -w '%{http_code}' -X POST "$BASE/api/v1/plans/validate" -H "Content-Type: application/json" \
+    -d '{"schema_version":"1.0","dataset_id":"flywire_630","model_id":"shiu_lif_rust","experiment_type":"single","activation":[{"selector":{"neuron_ids":["720575940000000001"]},"rate_hz":50}],"silencing":[],"readout":[{"selector":{"group_id":"mn9"}}],"duration_ms":100,"repeats":1,"base_seed":42,"report_language":"en"}')
+UNKNOWN_IDS=$(json_get "$(cat "$UNKNOWN_BODY")" '[d["error"]["code"], d["error"]["details"]["unknown_neuron_ids"]]') || UNKNOWN_IDS="(not a JSON error envelope)"
+if [[ "$UNKNOWN_CODE" != "422" || "$UNKNOWN_IDS" != '["VALIDATION_FAILED", ["720575940000000001"]]' ]]; then
+    echo "Error: unknown neuron id returned $UNKNOWN_CODE $UNKNOWN_IDS: $(cat "$UNKNOWN_BODY")" >&2
+    exit 1
+fi
+echo "Unknown neuron ids are rejected: $UNKNOWN_IDS"
 
 echo "[4/8] Submitting job with Idempotency-Key..."
 JOB_RESP=$(curl -s -X POST "$BASE/api/v1/jobs" "${AUTH[@]}" \
@@ -196,10 +217,17 @@ if [[ -f "$ROOT_DIR/data/annotations_630.tsv" && "$D_ANN" != "True" ]]; then
 fi
 echo "Digest: A=$D_A B=$D_B spikes, readout hops from stimulated $D_READOUT_HOPS, annotations_ready=$D_ANN, annotated share of active neurons $D_COV."
 if [[ "${SMOKE_INTERPRET:-0}" == "1" ]]; then
-    # Opt-in: one real (paid) claude -p interpretation.
+    # Opt-in: one real (paid) claude -p interpretation. v4: POST queues it (202), GET polls.
     INTERP=$(curl -s -X POST "${AUTH[@]}" -H "Content-Type: application/json" -d '{"language":"en"}' \
         "$BASE/api/v1/jobs/$JOB_ID/interpretation")
-    I_H=$(json_get "$INTERP" 'd["interpretation"]["headline"]') || { echo "Error: interpretation failed: $INTERP" >&2; exit 1; }
+    I_STATE=$(json_get "$INTERP" 'd["state"]') || { echo "Error: interpretation request failed: $INTERP" >&2; exit 1; }
+    for i in {1..200}; do
+        [[ "$I_STATE" == "ready" || "$I_STATE" == "failed" ]] && break
+        sleep 3
+        INTERP=$(curl -s "${AUTH[@]}" "$BASE/api/v1/jobs/$JOB_ID/interpretation")
+        I_STATE=$(json_get "$INTERP" 'd["state"]')
+    done
+    I_H=$(json_get "$INTERP" 'd["interpretation"]["headline"]') || { echo "Error: interpretation ended as $I_STATE: $INTERP" >&2; exit 1; }
     echo "Interpretation headline: $I_H"
 fi
 

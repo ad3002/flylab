@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ad3002/flylab/internal/api"
 	"github.com/ad3002/flylab/internal/config"
@@ -29,6 +30,9 @@ type testEnv struct {
 	cfg     *config.Config
 	server  *api.Server
 	interp  *interpret.Service
+	reg     *contracts.Registry
+	val     *contracts.Validator
+	llm     *llm.Client
 	// bodies collects every response body so tests can assert that secrets never leak.
 	bodies   []string
 	bodiesMu sync.Mutex
@@ -85,6 +89,11 @@ func newEnv(t *testing.T, mutate func(*config.Config)) *testEnv {
 		InterpretRateLimitPerHour:      1000,
 		InterpretRateLimitPerIPPerHour: 1000,
 		InterpretGlobalLimitPerHour:    1000,
+		InterpretConcurrency:           1,
+		InterpretQueueMax:              20,
+
+		AIDailyBudgetUSD:     1000,
+		AIUserDailyBudgetUSD: 1000,
 	}
 	if mutate != nil {
 		mutate(cfg)
@@ -98,23 +107,60 @@ func newEnv(t *testing.T, mutate func(*config.Config)) *testEnv {
 	if err != nil {
 		t.Fatalf("Failed to create validator: %v", err)
 	}
+	// Like the server: explicit neuron ids must be neurons of the real v630 connectome.
+	val.SetNeuronIDs(realNeuronIDs(t))
 	store, err := storage.OpenStore(cfg.DBPath)
 	if err != nil {
 		t.Fatalf("Failed to open store: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
 
-	llmClient, err := llm.NewClient(cfg, val, reg)
+	budget, err := llm.NewBudget(store, cfg.AIDailyBudgetUSD, cfg.AIUserDailyBudgetUSD)
+	if err != nil {
+		t.Fatalf("Failed to create the AI budget: %v", err)
+	}
+	llmClient, err := llm.NewClient(cfg, val, reg, budget)
 	if err != nil {
 		t.Fatalf("Failed to create llm client: %v", err)
 	}
 	server := api.NewServer(cfg, store, val, reg, llmClient)
-	interp, err := interpret.NewService(cfg, store, reg, val, llmClient)
+	e := &testEnv{t: t, store: store, cfg: cfg, server: server, reg: reg, val: val, llm: llmClient}
+	e.interp = e.startInterpreter()
+	e.handler = server.Router()
+	return e
+}
+
+// startInterpreter builds and starts an interpretation service (queue worker) on the env's
+// store and connects it to the server; it is stopped when the test ends.
+func (e *testEnv) startInterpreter() *interpret.Service {
+	e.t.Helper()
+	interp, err := interpret.NewService(e.cfg, e.store, e.reg, e.val, e.llm)
 	if err != nil {
-		t.Fatalf("Failed to create interpretation service: %v", err)
+		e.t.Fatalf("Failed to create interpretation service: %v", err)
 	}
-	server.SetInterpreter(interp)
-	return &testEnv{t: t, handler: server.Router(), store: store, cfg: cfg, server: server, interp: interp}
+	interp.PollInterval = 20 * time.Millisecond
+	interp.PersistRetryDelays = []time.Duration{10 * time.Millisecond}
+	if err := interp.Start(); err != nil {
+		e.t.Fatalf("Failed to start the interpretation worker: %v", err)
+	}
+	e.t.Cleanup(interp.Stop)
+	e.server.SetInterpreter(interp)
+	return interp
+}
+
+var (
+	neuronIDsOnce sync.Once
+	neuronIDs     *contracts.NeuronIDSet
+	neuronIDsErr  error
+)
+
+func realNeuronIDs(t *testing.T) *contracts.NeuronIDSet {
+	t.Helper()
+	neuronIDsOnce.Do(func() { neuronIDs, neuronIDsErr = contracts.LoadNeuronIDs(filepath.Join(projectRoot(t), "data")) })
+	if neuronIDsErr != nil {
+		t.Fatalf("load the v630 neuron ids: %v", neuronIDsErr)
+	}
+	return neuronIDs
 }
 
 type reqOpt func(*http.Request)

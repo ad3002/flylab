@@ -7,6 +7,11 @@
 //   - no concurrency slot in time   -> ErrBusy (HTTP 503 LLM_BUSY)
 //   - per-user / per-IP / global hourly limit reached, or a parse already in flight for the
 //     same account -> *RateLimitError (HTTP 429 RATE_LIMITED, Scope says which)
+//   - rolling 24 h AI budget used up -> *BudgetError (HTTP 429 AI_BUDGET_EXHAUSTED); spend
+//     unreadable -> *BudgetCheckError; a finished call whose cost cannot be recorded ->
+//     *UsageRecordError (contract v4 section 3)
+//   - a plan naming neuron ids that are not in the connectome -> status needs_input (the user
+//     typed them, so it is a question, not an LLM error; contract v4 section 5)
 package llm
 
 import (
@@ -30,6 +35,7 @@ import (
 	"github.com/ad3002/flylab/internal/contracts"
 	"github.com/ad3002/flylab/internal/domain"
 	"github.com/ad3002/flylab/internal/ratelimit"
+	"github.com/ad3002/flylab/internal/storage"
 )
 
 type ParseStatus string
@@ -41,6 +47,12 @@ const (
 	StatusInvalid     ParseStatus = "invalid"
 
 	MaxPromptChars = 4000
+
+	// Output caps of the planner's free text (contract v4 section 1): enforced by the JSON
+	// schema and re-checked after parsing.
+	MaxMessageChars         = 500
+	MaxUnresolvedFields     = 10
+	MaxUnresolvedFieldChars = 80
 
 	SourceClaude    = "claude"
 	SourceHeuristic = "heuristic_fallback"
@@ -119,12 +131,20 @@ type Client struct {
 	limitMu       sync.Mutex
 	inFlight      map[int64]bool
 
+	// budget is the rolling 24 h AI spend limit; every finished claude call is recorded in it.
+	budget *Budget
+
 	// BusyWait is how long a request waits for a free planner slot (30 s per contract;
 	// tests shorten it).
 	BusyWait time.Duration
 }
 
-func NewClient(cfg *config.Config, validator *contracts.Validator, registry *contracts.Registry) (*Client, error) {
+// NewClient builds the planner. budget is required: every claude call is recorded and checked
+// against it.
+func NewClient(cfg *config.Config, validator *contracts.Validator, registry *contracts.Registry, budget *Budget) (*Client, error) {
+	if budget == nil {
+		return nil, errors.New("the planner needs the AI budget (llm.NewBudget)")
+	}
 	if cfg.LLMMaxConcurrency < 1 {
 		return nil, fmt.Errorf("LLM_MAX_CONCURRENCY must be >= 1 (got %d)", cfg.LLMMaxConcurrency)
 	}
@@ -156,9 +176,13 @@ func NewClient(cfg *config.Config, validator *contracts.Validator, registry *con
 		ipLimiter:     ratelimit.New(cfg.ParseRateLimitPerIPPerHour, time.Hour),
 		globalLimiter: ratelimit.New(cfg.ParseGlobalLimitPerHour, time.Hour),
 		inFlight:      map[int64]bool{},
+		budget:        budget,
 		BusyWait:      defaultBusyWait,
 	}, nil
 }
+
+// Budget is the AI budget shared by the planner and the interpreter.
+func (c *Client) Budget() *Budget { return c.budget }
 
 // SystemPrompt and PlannerSchema expose the generated planner inputs (for tests and docs).
 func (c *Client) SystemPrompt() string  { return c.systemPrompt }
@@ -282,6 +306,10 @@ func (c *Client) ParsePromptFrom(ctx context.Context, userID int64, clientIP, pr
 		}, nil
 	}
 
+	// The AI budget is checked before any rate-limit unit is used.
+	if err := c.budget.Check(userID); err != nil {
+		return nil, err
+	}
 	release, err := c.admit(userID, clientIP)
 	if err != nil {
 		return nil, err
@@ -306,7 +334,7 @@ func (c *Client) ParsePromptFrom(ctx context.Context, userID int64, clientIP, pr
 	}
 	defer func() { <-c.sem }()
 
-	out, meta, err := c.runClaude(ctx, bin, prompt)
+	out, meta, err := c.runClaude(ctx, bin, userID, prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -357,17 +385,16 @@ func argsFor(model, systemPrompt, schema string) []string {
 }
 
 // StructuredCall is one `claude -p` invocation with a JSON schema. The planner and the
-// interpreter use the same flags; Stdin carries the user message (never argv).
+// interpreter use the same flags; Stdin carries the user message (never argv). UserID and Kind
+// (storage.UsageKind*) attribute the call's cost in llm_usage.
 type StructuredCall struct {
 	Model        string
 	SystemPrompt string
 	Schema       string
 	Stdin        string
 	Timeout      time.Duration
-	// OnSlot, when set, runs once a concurrency slot is held and before claude starts; an
-	// error from it releases the slot and is returned as is (claude never runs). The
-	// interpreter records its rate-limit windows here, so a busy slot costs no quota.
-	OnSlot func() error
+	UserID       int64
+	Kind         string
 }
 
 // StructuredResult is the structured_output of a successful call plus its metadata.
@@ -378,9 +405,11 @@ type StructuredResult struct {
 	Wall       time.Duration
 }
 
-// RunStructured runs one call on the planner's shared concurrency slots (LLM_MAX_CONCURRENCY).
-// There is no heuristic fallback here: a missing or broken CLI, a failed or timed-out run, an
-// is_error envelope or a missing structured_output is an *Error; no slot in time is ErrBusy.
+// RunStructured runs one call for the interpreter. It does NOT use the planner's slots
+// (LLM_MAX_CONCURRENCY): the interpretation queue worker bounds its own concurrency
+// (INTERPRET_CONCURRENCY). There is no heuristic fallback here: a missing or broken CLI, a
+// failed or timed-out run, an is_error envelope or a missing structured_output is an *Error;
+// a cost that cannot be recorded is *UsageRecordError.
 func (c *Client) RunStructured(ctx context.Context, call StructuredCall) (*StructuredResult, error) {
 	bin, missing, err := resolveClaude(c.cfg.ClaudeBin)
 	if missing {
@@ -389,19 +418,20 @@ func (c *Client) RunStructured(ctx context.Context, call StructuredCall) (*Struc
 	if err != nil {
 		return nil, &Error{Reason: fmt.Sprintf("claude CLI is not usable: %v", err)}
 	}
-	if err := c.acquire(ctx); err != nil {
-		return nil, err
-	}
-	defer func() { <-c.sem }()
-	if call.OnSlot != nil {
-		if err := call.OnSlot(); err != nil {
-			return nil, err
-		}
-	}
 	return c.invoke(ctx, bin, call)
 }
 
+// invoke runs claude once and records the finished call (success or failure) in llm_usage with
+// the envelope's total_cost_usd (0 without an envelope).
 func (c *Client) invoke(parent context.Context, bin string, call StructuredCall) (*StructuredResult, error) {
+	res, cost, callErr := c.run(parent, bin, call)
+	if err := c.budget.Record(call.UserID, call.Kind, cost, callErr == nil); err != nil {
+		return nil, &UsageRecordError{Err: err, CallErr: callErr}
+	}
+	return res, callErr
+}
+
+func (c *Client) run(parent context.Context, bin string, call StructuredCall) (*StructuredResult, float64, error) {
 	ctx, cancel := context.WithTimeout(parent, call.Timeout)
 	defer cancel()
 
@@ -417,50 +447,60 @@ func (c *Client) invoke(parent context.Context, bin string, call StructuredCall)
 	wall := time.Since(start)
 
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) && parent.Err() == nil {
-		return nil, &Error{Reason: fmt.Sprintf("claude CLI timed out after %d s%s",
+		return nil, 0, &Error{Reason: fmt.Sprintf("claude CLI timed out after %d s%s",
 			int(call.Timeout.Seconds()), stderrSuffix(stderr.String()))}
 	}
 	if parent.Err() != nil {
-		return nil, &Error{Reason: fmt.Sprintf("request cancelled while claude was running: %v", parent.Err())}
+		return nil, 0, &Error{Reason: fmt.Sprintf("request cancelled while claude was running: %v", parent.Err())}
 	}
 
 	var env claudeEnvelope
 	envErr := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env)
+	cost := 0.0
+	if envErr == nil {
+		cost = env.TotalCostUSD
+	}
 
 	if runErr != nil {
 		if envErr == nil && env.IsError {
-			return nil, &Error{Reason: fmt.Sprintf("claude reported an error (subtype=%s, %v): %s",
+			return nil, cost, &Error{Reason: fmt.Sprintf("claude reported an error (subtype=%s, %v): %s",
 				orNone(env.Subtype), runErr, excerpt(env.Result))}
 		}
 		detail := stderr.String()
 		if strings.TrimSpace(detail) == "" {
 			detail = stdout.String()
 		}
-		return nil, &Error{Reason: fmt.Sprintf("claude CLI failed (%v): %s", runErr, excerpt(detail))}
+		return nil, cost, &Error{Reason: fmt.Sprintf("claude CLI failed (%v): %s", runErr, excerpt(detail))}
 	}
 	if envErr != nil {
-		return nil, &Error{Reason: fmt.Sprintf("claude CLI returned non-JSON output (%v): %s",
+		return nil, cost, &Error{Reason: fmt.Sprintf("claude CLI returned non-JSON output (%v): %s",
 			envErr, excerpt(stdout.String()))}
 	}
 	if env.IsError {
-		return nil, &Error{Reason: fmt.Sprintf("claude reported an error (subtype=%s): %s",
+		return nil, cost, &Error{Reason: fmt.Sprintf("claude reported an error (subtype=%s): %s",
 			orNone(env.Subtype), excerpt(env.Result))}
 	}
 	raw := bytes.TrimSpace(env.StructuredOutput)
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
-		return nil, &Error{Reason: fmt.Sprintf("claude response has no structured_output (subtype=%s)%s",
+		return nil, cost, &Error{Reason: fmt.Sprintf("claude response has no structured_output (subtype=%s)%s",
 			orNone(env.Subtype), resultSuffix(env.Result))}
 	}
-	return &StructuredResult{Output: raw, CostUSD: env.TotalCostUSD, DurationMS: env.DurationMS, Wall: wall}, nil
+	return &StructuredResult{Output: raw, CostUSD: env.TotalCostUSD, DurationMS: env.DurationMS, Wall: wall}, cost, nil
 }
 
-func (c *Client) runClaude(parent context.Context, bin, prompt string) (*plannerOutput, map[string]interface{}, error) {
+func (c *Client) runClaude(parent context.Context, bin string, userID int64, prompt string) (*plannerOutput, map[string]interface{}, error) {
+	stdin, err := plannerStdin(prompt)
+	if err != nil {
+		return nil, nil, &Error{Reason: err.Error()}
+	}
 	res, err := c.invoke(parent, bin, StructuredCall{
 		Model:        c.cfg.ClaudeModel,
 		SystemPrompt: c.systemPrompt,
 		Schema:       c.plannerSchema,
-		Stdin:        prompt,
+		Stdin:        stdin,
 		Timeout:      time.Duration(c.cfg.ClaudeTimeoutSeconds) * time.Second,
+		UserID:       userID,
+		Kind:         storage.UsageKindPlanner,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -524,6 +564,19 @@ func decodePlannerOutput(raw []byte) (*plannerOutput, error) {
 	if strings.TrimSpace(out.Message) == "" {
 		return nil, errors.New("message is empty")
 	}
+	// Output caps (defence in depth behind the schema): a violation is an error naming the
+	// field, never a silent truncation.
+	if n := utf8.RuneCountInString(out.Message); n > MaxMessageChars {
+		return nil, fmt.Errorf("message is %d characters, over the cap of %d", n, MaxMessageChars)
+	}
+	if len(out.UnresolvedFields) > MaxUnresolvedFields {
+		return nil, fmt.Errorf("unresolved_fields has %d items, over the cap of %d", len(out.UnresolvedFields), MaxUnresolvedFields)
+	}
+	for i, f := range out.UnresolvedFields {
+		if n := utf8.RuneCountInString(f); n > MaxUnresolvedFieldChars {
+			return nil, fmt.Errorf("unresolved_fields[%d] is %d characters, over the cap of %d", i, n, MaxUnresolvedFieldChars)
+		}
+	}
 	if ParseStatus(out.Status) == StatusReady && out.Plan == nil {
 		return nil, errors.New(`status "ready" without a plan`)
 	}
@@ -548,6 +601,10 @@ func (c *Client) interpret(out *plannerOutput, meta map[string]interface{}, data
 	}
 	valRes, err := c.validator.ValidateRawJSON(raw)
 	if err != nil {
+		var unk *contracts.UnknownNeuronsError
+		if errors.As(err, &unk) {
+			return unknownNeuronsQuestion(unk, meta, lang), nil
+		}
 		return nil, &Error{Reason: fmt.Sprintf("planner plan failed validation: %v", err)}
 	}
 	return &ParseResult{
@@ -558,6 +615,39 @@ func (c *Client) interpret(out *plannerOutput, meta map[string]interface{}, data
 		Message:         out.Message,
 		LLMMetadata:     meta,
 	}, nil
+}
+
+// unknownNeuronsQuestion turns root ids that are not in the connectome into a needs_input
+// answer: the user typed them, so the planner asks instead of failing.
+func unknownNeuronsQuestion(unk *contracts.UnknownNeuronsError, meta map[string]interface{}, lang string) *ParseResult {
+	ids := unk.IDs
+	more := len(ids) - 5
+	if more > 0 {
+		ids = ids[:5]
+	}
+	list := strings.Join(ids, ", ")
+	var msg string
+	if lang == "ru" {
+		if more > 0 {
+			list += fmt.Sprintf(" (и ещё %d)", more)
+		}
+		msg = fmt.Sprintf("Этих FlyWire root ID нет в коннектоме FlyWire v630: %s. Проверьте ID или укажите зарегистрированную группу нейронов.", list)
+	} else {
+		if more > 0 {
+			list += fmt.Sprintf(" (and %d more)", more)
+		}
+		msg = fmt.Sprintf("These FlyWire root IDs are not in the FlyWire v630 connectome: %s. Check the IDs or name a registered neuron group instead.", list)
+	}
+	fields := unk.Paths()
+	if len(fields) > MaxUnresolvedFields {
+		fields = fields[:MaxUnresolvedFields]
+	}
+	return &ParseResult{
+		Status:           StatusNeedsInput,
+		UnresolvedFields: fields,
+		Message:          msg,
+		LLMMetadata:      meta,
+	}
 }
 
 // ToExperimentPlan converts an LLM plan into the canonical plan (dataset defaults to flywire_630).

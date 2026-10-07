@@ -29,7 +29,14 @@ missing, `/plans/parse` falls back to a keyword parser and every response carrie
 per-IP registration, per-IP and global parse budgets, password-hash concurrency) are listed in
 `README.md` and `docs/v2_contract.md` section 10; the client address is nginx's `X-Real-IP`.
 Open registration hands every visitor a parse quota on the operator's Claude login, so once the
-accounts you need exist, consider `REGISTRATION_OPEN=false`. Accounts can be created on the host with
+accounts you need exist, consider `REGISTRATION_OPEN=false`, or set `REGISTRATION_INVITE_CODE` to
+make registration invite-only. Every Claude call is recorded in the `llm_usage` table and capped
+by a rolling 24 h budget in USD (`AI_DAILY_BUDGET_USD`, default 20, and `AI_USER_DAILY_BUDGET_USD`,
+default 3); interpretations run on a persisted queue (`INTERPRET_CONCURRENCY`, default 1;
+`INTERPRET_QUEUE_MAX`, default 20) that does not use the planner's slots (see `.env.example`
+and `docs/v4_guardrails.md`). The v4 tables (`llm_usage`, `interpretation_requests`) are created
+at startup when missing; existing rows are untouched. The completeness CSV named in
+`data/dataset_manifest.json` must be present: the server refuses to start without it. Accounts can be created on the host with
 `su - flylab -c 'cd app && DB_PATH=/mnt/beta/flylab/db/flylab.db bin/flylab user create --username U --password P'`.
 
 ## Updating

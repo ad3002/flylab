@@ -10,8 +10,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,100..900;1,62..125,100..900&family=Hanken+Grotesk:ital,wght@0,400..700;1,400&family=Martian+Mono:wdth,wght@75..112.5,100..800&display=swap">
-  <link rel="stylesheet" href="/static/css/style.css?v=v3en">
-  <link rel="stylesheet" href="/static/css/app.css?v=v3en">
+  <link rel="stylesheet" href="/static/css/style.css?v=v4g">
+  <link rel="stylesheet" href="/static/css/app.css?v=v4g">
   <!-- Motion flag before first paint: .mo = motion allowed (absent under prefers-reduced-motion). -->
   <script>(function(d){d.classList.add("js");if(!window.matchMedia("(prefers-reduced-motion: reduce)").matches){d.classList.add("mo");}})(document.documentElement);</script>
 </head>
@@ -63,6 +63,12 @@
             <input id="auth-password" name="password" type="password" autocomplete="current-password" required minlength="8" maxlength="128" aria-describedby="hint-password">
             <span class="field-hint" id="hint-password">At least 8 characters.</span>
           </label>
+          <label class="field" id="field-invite" hidden>
+            <span class="field-label">Invite code</span>
+            <input id="auth-invite" name="invite_code" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="256" aria-describedby="hint-invite err-invite">
+            <span class="field-hint" id="hint-invite">New accounts on this server need an invite code. Ask the lab administrator for one.</span>
+            <span class="field-error" id="err-invite" role="alert" hidden></span>
+          </label>
           <div id="auth-error" role="alert"></div>
           <button class="btn btn-primary auth-submit" type="submit" id="auth-submit">Sign in</button>
         </form>
@@ -101,6 +107,6 @@
     <main id="view" class="view" tabindex="-1"></main>
   </div>
 
-  <script type="module" src="/static/js/app.js?v=v3en"></script>
+  <script type="module" src="/static/js/app.js?v=v4g"></script>
 </body>
 </html>

@@ -1,5 +1,5 @@
-import { SpikingNet, drawRasterThumb } from "/static/js/neural.js?v=v3en";
-import { isReduced, onReducedChange, finePointer, isLite, countUp, splitLines, assignLines, magnetic } from "/static/js/motion.js?v=v3en";
+import { SpikingNet, drawRasterThumb } from "/static/js/neural.js?v=v4g";
+import { isReduced, onReducedChange, finePointer, isLite, countUp, splitLines, assignLines, magnetic } from "/static/js/motion.js?v=v4g";
 
 document.documentElement.classList.add("js");
 const root = document.documentElement;

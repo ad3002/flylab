@@ -121,6 +121,37 @@ func (s *Store) initSchema() error {
 		result_json TEXT
 	);
 
+	-- v4: every finished claude -p call (planner or interpreter, success or failure) with the
+	-- CLI's total_cost_usd, for the rolling 24 h AI budgets.
+	CREATE TABLE IF NOT EXISTS llm_usage (
+		id INTEGER PRIMARY KEY,
+		user_id INTEGER,
+		kind TEXT NOT NULL,
+		cost_usd REAL NOT NULL,
+		ok INTEGER NOT NULL,
+		created_at TIMESTAMP NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_llm_usage_created ON llm_usage(created_at);
+	CREATE INDEX IF NOT EXISTS idx_llm_usage_user_created ON llm_usage(user_id, created_at);
+
+	-- v4: the persisted interpretation queue (results stay in interpretations).
+	CREATE TABLE IF NOT EXISTS interpretation_requests (
+		id INTEGER PRIMARY KEY,
+		job_id TEXT NOT NULL,
+		user_id INTEGER NOT NULL,
+		language TEXT NOT NULL,
+		regenerate INTEGER NOT NULL,
+		status TEXT NOT NULL,
+		error_code TEXT,
+		error_message TEXT,
+		queued_at TIMESTAMP NOT NULL,
+		started_at TIMESTAMP,
+		finished_at TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_interp_req_status ON interpretation_requests(status, id);
+	CREATE INDEX IF NOT EXISTS idx_interp_req_job ON interpretation_requests(job_id, id);
+	CREATE INDEX IF NOT EXISTS idx_interp_req_user_status ON interpretation_requests(user_id, status);
+
 	CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 	CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
 	CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);

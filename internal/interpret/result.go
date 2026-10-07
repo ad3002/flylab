@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ad3002/flylab/internal/contracts"
 	"github.com/ad3002/flylab/internal/domain"
@@ -104,6 +105,7 @@ func decodeOutput(raw []byte) (*Interpretation, error) {
 			problems = append(problems, fmt.Sprintf("hypotheses[%d].test has no plan", i))
 		}
 	}
+	problems = append(problems, capViolations(&out)...)
 	if len(problems) > 0 {
 		return nil, errors.New(strings.Join(problems, "; "))
 	}
@@ -119,6 +121,50 @@ func decodeOutput(raw []byte) (*Interpretation, error) {
 		}
 	}
 	return &out, nil
+}
+
+// capViolations re-checks the output caps the schema already carries (defence in depth): each
+// violation names the field; nothing is truncated.
+func capViolations(out *Interpretation) []string {
+	var v []string
+	text := func(field, s string, max int) {
+		if n := utf8.RuneCountInString(s); n > max {
+			v = append(v, fmt.Sprintf("%s is %d characters, over the cap of %d", field, n, max))
+		}
+	}
+	list := func(field string, items []string, maxItems, maxChars int) {
+		if len(items) > maxItems {
+			v = append(v, fmt.Sprintf("%s has %d items, over the cap of %d", field, len(items), maxItems))
+		}
+		for i, s := range items {
+			text(fmt.Sprintf("%s[%d]", field, i), s, maxChars)
+		}
+	}
+	c := Caps
+	text("headline", out.Headline, c.Headline)
+	if len(out.Observations) > c.Observations {
+		v = append(v, fmt.Sprintf("observations has %d items, over the cap of %d", len(out.Observations), c.Observations))
+	}
+	for i, o := range out.Observations {
+		text(fmt.Sprintf("observations[%d].text", i), o.Text, c.ObservationText)
+		list(fmt.Sprintf("observations[%d].evidence", i), o.Evidence, c.EvidenceItems, c.EvidenceChars)
+	}
+	if len(out.Hypotheses) > c.Hypotheses {
+		v = append(v, fmt.Sprintf("hypotheses has %d items, over the cap of %d", len(out.Hypotheses), c.Hypotheses))
+	}
+	for i, h := range out.Hypotheses {
+		p := fmt.Sprintf("hypotheses[%d]", i)
+		text(p+".title", h.Title, c.Title)
+		text(p+".statement", h.Statement, c.Statement)
+		text(p+".confidence_reason", h.ConfidenceReason, c.ConfidenceReason)
+		list(p+".evidence", h.Evidence, c.EvidenceItems, c.EvidenceChars)
+		list(p+".caveats", h.Caveats, c.CaveatItems, c.CaveatChars)
+		text(p+".test.description", h.Test.Description, c.TestDescription)
+		text(p+".test.expected_if_true", h.Test.ExpectedIfTrue, c.ExpectedIfTrue)
+	}
+	list("limitations", out.Limitations, c.LimitationItems, c.LimitationChars)
+	list("suggested_reading", out.SuggestedReading, c.ReadingItems, c.ReadingChars)
+	return v
 }
 
 // PlanSaver persists a validated plan (storage.Store.SavePlan).

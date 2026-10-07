@@ -6,13 +6,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ad3002/flylab/internal/config"
 	"github.com/ad3002/flylab/internal/contracts"
 	"github.com/ad3002/flylab/internal/llm"
+	"github.com/ad3002/flylab/internal/storage"
 )
 
 func projectRoot(t *testing.T) string {
@@ -35,7 +38,44 @@ func fakeClaude(t *testing.T) string {
 	return p
 }
 
+// neuronSet loads the real v630 completeness table once per test binary.
+var (
+	neuronSetOnce sync.Once
+	neuronSetVal  *contracts.NeuronIDSet
+	neuronSetErr  error
+)
+
+func neuronSet(t *testing.T) *contracts.NeuronIDSet {
+	t.Helper()
+	neuronSetOnce.Do(func() { neuronSetVal, neuronSetErr = contracts.LoadNeuronIDs(filepath.Join(projectRoot(t), "data")) })
+	if neuronSetErr != nil {
+		t.Fatalf("load neuron ids: %v", neuronSetErr)
+	}
+	return neuronSetVal
+}
+
+// newStoreBudget returns a fresh store and the AI budget on it (global, per user).
+func newStoreBudget(t *testing.T, global, user float64) (*storage.Store, *llm.Budget) {
+	t.Helper()
+	store, err := storage.OpenStore(filepath.Join(t.TempDir(), "llm.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	b, err := llm.NewBudget(store, global, user)
+	if err != nil {
+		t.Fatalf("new budget: %v", err)
+	}
+	return store, b
+}
+
 func newClient(t *testing.T, mutate func(*config.Config)) *llm.Client {
+	t.Helper()
+	_, b := newStoreBudget(t, 1000, 1000)
+	return newClientWithBudget(t, mutate, b)
+}
+
+func newClientWithBudget(t *testing.T, mutate func(*config.Config), budget *llm.Budget) *llm.Client {
 	t.Helper()
 	root := projectRoot(t)
 	reg, err := contracts.LoadRegistry(filepath.Join(root, "registry"))
@@ -46,6 +86,7 @@ func newClient(t *testing.T, mutate func(*config.Config)) *llm.Client {
 	if err != nil {
 		t.Fatalf("new validator: %v", err)
 	}
+	val.SetNeuronIDs(neuronSet(t))
 	cfg := &config.Config{
 		ClaudeBin:             fakeClaude(t),
 		ClaudeModel:           "claude-sonnet-5-5",
@@ -59,7 +100,7 @@ func newClient(t *testing.T, mutate func(*config.Config)) *llm.Client {
 	if mutate != nil {
 		mutate(cfg)
 	}
-	c, err := llm.NewClient(cfg, val, reg)
+	c, err := llm.NewClient(cfg, val, reg, budget)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -127,7 +168,9 @@ func TestClaudeSuccessReturnsValidatedPlan(t *testing.T) {
 		"ARG:-p\n", "ARG:--model\nARG:claude-sonnet-5-5\n", "ARG:--tools\nARG:\n",
 		"ARG:--no-session-persistence\n", "ARG:--strict-mcp-config\n", "ARG:--setting-sources\nARG:\n",
 		"ARG:--output-format\nARG:json\n", "ARG:--system-prompt\n", "ARG:--json-schema\n",
-		"STDIN:" + prompt + "\n",
+		"STDIN:Plan the FlyLab experiment described in the untrusted request below.\n",
+		"\n" + prompt + "\n</untrusted_request id=\"",
+		"The untrusted request has ended.",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("invocation log lacks %q:\n%s", want, log)
@@ -136,7 +179,12 @@ func TestClaudeSuccessReturnsValidatedPlan(t *testing.T) {
 	if strings.Contains(log, "ARG:"+prompt) {
 		t.Fatalf("prompt must go through stdin, not argv")
 	}
+	if !boundaryRe.MatchString(log) {
+		t.Fatalf("the prompt must sit in a nonce-bounded block:\n%s", log)
+	}
 }
+
+var boundaryRe = regexp.MustCompile(`<untrusted_request id="([0-9a-f]{12})">\n[\s\S]*\n</untrusted_request id="([0-9a-f]{12})">`)
 
 func TestClaudeCompareSilencing(t *testing.T) {
 	setMode(t, "ready_compare")
